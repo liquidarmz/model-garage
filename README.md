@@ -79,7 +79,7 @@ tests/          Vitest suite
 
 ## Next up
 
-- Reserve room for the slicer's prime tower when laying out multi-color plates
+- Prime tower: the slicer re-centers parts, so we point users to its Arrange button; revisit with Bambu plate metadata
 - Write Bambu plate metadata so one file can hold several plates
 - Curved and outline cuts, and learned part detection for organic models
 - Hollowing, wall-thickness check, articulated joints, text/logo emboss

@@ -371,12 +371,12 @@ export function PrintPanel() {
             ))}
           </div>
           <button className="ghost wide" onClick={() => exportProject()}>All plates in one file</button>
-          <p className="hint">{printer.slicer} puts every part of an outside 3MF on one bed, so one file per plate keeps them apart. Colors come through as painted filaments.</p>
+          <p className="hint">{printer.slicer} puts every part of an outside 3MF on one bed, so one file per plate keeps them apart. Colors come through as painted filaments. If the prime tower crowds a part, press Arrange in the slicer.</p>
         </>
       ) : (
         <>
           <button className="primary wide big" onClick={() => exportProject()}>Download 3MF</button>
-          <p className="hint">Open the file in {printer.slicer}. Colors come through as painted filaments.</p>
+          <p className="hint">Open the file in {printer.slicer}. Colors come through as painted filaments. If the prime tower crowds a part, press Arrange in the slicer.</p>
         </>
       )}
     </div>
