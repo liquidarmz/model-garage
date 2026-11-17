@@ -123,3 +123,4 @@ input[type='range'] { accent-color: var(--accent); width: 100%; }
 .toast.err { background: #3a1f1f; border-color: #6b2f2f; }
 .toast small { color: var(--muted); font-size: 11px; }
 .dropzone { position: absolute; inset: 12px; border: 3px dashed var(--accent); border-radius: 18px; display: grid; place-items: center; font-size: 22px; font-weight: 700; background: rgba(255, 122, 26, 0.08); }
+.plate-buttons { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }

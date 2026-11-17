@@ -1,6 +1,6 @@
 import { create } from 'zustand';
-import type { TriMesh, MeshHealth, Vec3 } from '../core/mesh';
-import { type PrinterProfile, DEFAULT_PRINTER, PRINTERS, fitsPrinterAnyOrientation } from '../core/printers';
+import { type TriMesh, type MeshHealth, type Vec3, translateMesh } from '../core/mesh';
+import { type PrinterProfile, DEFAULT_PRINTER, PRINTERS, fitsPrinterAnyOrientation, plateOrigin } from '../core/printers';
 import type { SplitPlan } from '../core/smartcut';
 import { type CutSpec, type CutFace, newId, shiftCut, tiltCut } from '../core/pipeline';
 import { type ConnectorSettings, DEFAULT_CONNECTOR } from '../core/connectors';
@@ -99,7 +99,8 @@ interface State {
   scaleModel(factor: number): Promise<void>;
   mirrorModel(axis: 0 | 1 | 2): Promise<void>;
   layout(): Promise<void>;
-  exportProject(): Promise<void>;
+  /** Download a 3MF: every plate, or only `plate` (0-based) moved onto a single bed. */
+  exportProject(plate?: number): Promise<void>;
   dismissNotice(): void;
 }
 
@@ -313,10 +314,17 @@ export const useStore = create<State>((set, get) => {
         }),
       });
     },
-    exportProject: async () => {
+    exportProject: async (plate) => {
       await run('Writing 3MF', async () => {
         if (!get().placed.length) await get().layout();
-        const { placed, palette, slotCount, fileName } = get();
+        const { palette, slotCount, fileName, printer } = get();
+        const all = get().placed;
+        const plates = Math.max(...all.map((p) => p.plate)) + 1;
+        let placed = all;
+        if (plate !== undefined) {
+          const [ox, oy] = plateOrigin(plate, plates, printer);
+          placed = all.filter((p) => p.plate === plate).map((p) => ({ ...p, mesh: translateMesh(p.mesh, [-ox, -oy, 0]) }));
+        }
         const bytes = await export3mf(
           placed.map((p) => ({ name: p.name, mesh: p.mesh, colors: p.colors })),
           palette.slice(0, slotCount),
@@ -325,11 +333,11 @@ export const useStore = create<State>((set, get) => {
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         const stem = (fileName ?? 'model').replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '_');
-        a.download = `${stem}_model-garage.3mf`;
+        a.download = `${stem}_model-garage${plate !== undefined ? `_plate${plate + 1}` : ''}.3mf`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-        const plates = Math.max(...placed.map((p) => p.plate)) + 1;
-        set({ notice: `Saved ${a.download}. ${placed.length} pieces${plates > 1 ? ` laid out for ${plates} plates` : ''}. Open it in ${get().printer.slicer}.` });
+        const tip = plate === undefined && plates > 1 ? ` ${printer.slicer} opens all ${plates} plates' parts on one bed; download plates one at a time to keep them separate.` : '';
+        set({ notice: `Saved ${a.download} with ${placed.length} pieces. Open it in ${printer.slicer}.${tip}` });
       });
     },
     dismissNotice: () => set({ notice: null, error: null }),

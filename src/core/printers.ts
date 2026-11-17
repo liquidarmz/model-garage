@@ -46,3 +46,14 @@ export function fitsPrinterAnyOrientation(size: [number, number, number], p: Pri
   ];
   return perms.some((s) => fitsPrinter(s, p));
 }
+
+/**
+ * Where plate `i` of `count` starts, matching how Bambu Studio and Orca lay
+ * out multiple plates: a grid ceil(sqrt(count)) wide, each plate 1.2x its
+ * size apart, extra rows going toward -Y.
+ */
+export function plateOrigin(i: number, count: number, p: PrinterProfile): [number, number] {
+  const cols = Math.max(1, Math.ceil(Math.sqrt(count)));
+  const [w, d] = p.volume;
+  return [(i % cols) * w * 1.2, -Math.floor(i / cols) * d * 1.2];
+}

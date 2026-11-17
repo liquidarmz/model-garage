@@ -361,8 +361,24 @@ export function PrintPanel() {
         </ul>
         {tooBig.length > 0 && <div className="badge warn">! Go back to Chop to split the parts marked too big.</div>}
       </div>
-      <button className="primary wide big" onClick={exportProject}>Download 3MF</button>
-      <p className="hint">Open the file in {printer.slicer}. Colors come through as painted filaments; let the slicer re-arrange plates if you like.</p>
+      {plates > 1 ? (
+        <>
+          <div className="plate-buttons">
+            {Array.from({ length: plates }, (_, i) => (
+              <button key={i} className="primary wide" onClick={() => exportProject(i)}>
+                Download plate {i + 1} ({placed.filter((p) => p.plate === i).length} pieces)
+              </button>
+            ))}
+          </div>
+          <button className="ghost wide" onClick={() => exportProject()}>All plates in one file</button>
+          <p className="hint">{printer.slicer} puts every part of an outside 3MF on one bed, so one file per plate keeps them apart. Colors come through as painted filaments.</p>
+        </>
+      ) : (
+        <>
+          <button className="primary wide big" onClick={() => exportProject()}>Download 3MF</button>
+          <p className="hint">Open the file in {printer.slicer}. Colors come through as painted filaments.</p>
+        </>
+      )}
     </div>
   );
 }

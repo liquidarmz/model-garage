@@ -44,15 +44,20 @@ export function build3mfModel(objects: ExportObject[], palette: string[]): strin
   out.push('  <basematerials id="1">');
   palette.forEach((c, i) => out.push(`   <base name="Filament ${i + 1}" displaycolor="${hexColor(c)}"/>`));
   out.push('  </basematerials>');
+  const centers: [number, number, number][] = [];
   objects.forEach((o, i) => {
     const id = i + 2;
     const objSlot = o.slot ?? (o.colors ? mostCommon(o.colors) : 0);
     out.push(`  <object id="${id}" type="model" name="${esc(o.name)}" pid="1" pindex="${objSlot}">`);
     out.push('   <mesh>');
     out.push('    <vertices>');
+    // Slicers place each object by its build-item transform, so store the mesh
+    // around its own center and move it into position with the transform.
     const p = o.mesh.positions;
+    const c = meshCenter(p);
+    centers.push(c);
     const lines: string[] = [];
-    for (let v = 0; v < p.length; v += 3) lines.push(`     <vertex x="${fmt(p[v])}" y="${fmt(p[v + 1])}" z="${fmt(p[v + 2])}"/>`);
+    for (let v = 0; v < p.length; v += 3) lines.push(`     <vertex x="${fmt(p[v] - c[0])}" y="${fmt(p[v + 1] - c[1])}" z="${fmt(p[v + 2] - c[2])}"/>`);
     out.push(lines.join('\n'));
     out.push('    </vertices>');
     out.push('    <triangles>');
@@ -75,10 +80,24 @@ export function build3mfModel(objects: ExportObject[], palette: string[]): strin
   });
   out.push(' </resources>');
   out.push(' <build>');
-  objects.forEach((_, i) => out.push(`  <item objectid="${i + 2}"/>`));
+  objects.forEach((_, i) => {
+    const [x, y, z] = centers[i];
+    out.push(`  <item objectid="${i + 2}" transform="1 0 0 0 1 0 0 0 1 ${fmt(x)} ${fmt(y)} ${fmt(z)}" printable="1"/>`);
+  });
   out.push(' </build>');
   out.push('</model>');
   return out.join('\n');
+}
+
+/** Center of the bounding box in X/Y; Z stays at the base so parts sit on the plate. */
+function meshCenter(p: Float32Array): [number, number, number] {
+  let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = 0; i < p.length; i += 3) {
+    if (p[i] < x0) x0 = p[i]; if (p[i] > x1) x1 = p[i];
+    if (p[i + 1] < y0) y0 = p[i + 1]; if (p[i + 1] > y1) y1 = p[i + 1];
+    if (p[i + 2] < z0) z0 = p[i + 2];
+  }
+  return p.length ? [(x0 + x1) / 2, (y0 + y1) / 2, z0] : [0, 0, 0];
 }
 
 function mostCommon(a: Uint8Array): number {

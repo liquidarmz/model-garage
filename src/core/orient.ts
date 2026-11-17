@@ -1,7 +1,7 @@
 import type { Manifold } from 'manifold-3d';
 import { fromSolid, solidBounds, normalize, cross, dot } from './geometry';
 import { triangleNormalsAndAreas, type Vec3 } from './mesh';
-import type { PrinterProfile } from './printers';
+import { type PrinterProfile, plateOrigin } from './printers';
 
 /** Column-major 4x4 rotation taking unit vector a onto unit vector b. */
 export function rotationBetween(a: Vec3, b: Vec3): number[] {
@@ -82,16 +82,21 @@ export function layoutOnPlates(
     return { id: p.id, s, w: b.max[0] - b.min[0], d: b.max[1] - b.min[1] };
   }).sort((a, b) => b.d - a.d);
 
-  const placed: PlacedPart[] = [];
+  const slots: { o: (typeof oriented)[number]; x: number; y: number; plate: number }[] = [];
   let plate = 0, x = gap, y = gap, rowD = 0;
   for (const o of oriented) {
     if (x + o.w > W - gap && x > gap) { x = gap; y += rowD + gap; rowD = 0; }
     if (y + o.d > D - gap && y > gap) { plate += 1; x = gap; y = gap; rowD = 0; }
-    const b = solidBounds(o.s);
-    const s = o.s.translate([x - b.min[0] + plate * (W + 20), y - b.min[1], 0]);
-    placed.push({ id: o.id, solid: s, plate });
+    slots.push({ o, x, y, plate });
     x += o.w + gap;
     rowD = Math.max(rowD, o.d);
   }
-  return placed;
+  const count = plate + 1;
+  return slots.map(({ o, x: sx, y: sy, plate: pl }) => {
+    const b = solidBounds(o.s);
+    const [ox, oy] = plateOrigin(pl, count, printer);
+    const s = o.s.translate([sx - b.min[0] + ox, sy - b.min[1] + oy, 0]);
+    o.s.delete();
+    return { id: o.id, solid: s, plate: pl };
+  });
 }

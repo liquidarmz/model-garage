@@ -4,6 +4,7 @@ import { OrbitControls, Grid, GizmoHelper, GizmoViewport } from '@react-three/dr
 import * as THREE from 'three';
 import { useStore, type PartView, type PlacedView } from './store';
 import { planeBasis } from '../core/geometry';
+import { plateOrigin } from '../core/printers';
 import type { TriMesh, Vec3 } from '../core/mesh';
 
 const PART_TINTS = ['#9FB7D9', '#E0A96D', '#9CCB9A', '#D99AB5', '#C9B6E4', '#E6D27A', '#8FD1CF', '#E39A8D'];
@@ -141,8 +142,9 @@ function Plate() {
     <>
       {Array.from({ length: plates }, (_, i) => {
         // In print view parts sit in plate coords (0..W); elsewhere the model is centered at the origin.
-        const cx = step === 'print' ? w / 2 + i * (w + 20) : 0;
-        const cy = step === 'print' ? d / 2 : 0;
+        const [ox, oy] = plateOrigin(i, plates, printer);
+        const cx = step === 'print' ? w / 2 + ox : 0;
+        const cy = step === 'print' ? d / 2 + oy : 0;
         return (
           <group key={i}>
             <mesh position={[cx, cy, -0.6]} receiveShadow>
@@ -178,9 +180,13 @@ function FitCamera() {
     let size = 200;
     if (step === 'print' && placed.length) {
       const plates = Math.max(...placed.map((p) => p.plate)) + 1;
-      const totalW = plates * printer.volume[0] + (plates - 1) * 20;
-      center = new THREE.Vector3(totalW / 2, printer.volume[1] / 2, 0);
-      size = Math.max(totalW, printer.volume[1]);
+      const [w, d] = printer.volume;
+      const far = plateOrigin(plates - 1, plates, printer);
+      const cols = Math.ceil(Math.sqrt(plates));
+      const minY = Math.min(0, far[1]);
+      const totalW = (cols - 1) * w * 1.2 + w;
+      center = new THREE.Vector3(totalW / 2, (minY + d) / 2, 0);
+      size = Math.max(totalW, d - minY);
     } else if (base) {
       const b = base.bounds;
       center = new THREE.Vector3(0, 0, (b.max[2] + b.min[2]) / 2);
