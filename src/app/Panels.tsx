@@ -147,7 +147,7 @@ function SeamEditor() {
   const commitCuts = useStore((s) => s.commitCuts);
   const base = useStore((s) => s.base);
   if (!cuts.length || !base) return null;
-  const b = base.boundingBox();
+  const b = base.bounds;
   return (
     <div className="card">
       <div className="card-title">Seams</div>
@@ -377,7 +377,7 @@ export function WorkshopPanel() {
   const [pos, setPos] = useState(50);
   const [height, setHeight] = useState('');
   if (!base) return <div className="panel-body"><h2>Workshop</h2><p className="muted">Drop a model first.</p></div>;
-  const b = base.boundingBox();
+  const b = base.bounds;
   const lo = b.min[axis], hi = b.max[axis];
   const offset = lo + ((hi - lo) * pos) / 100;
   const curH = b.max[2] - b.min[2];

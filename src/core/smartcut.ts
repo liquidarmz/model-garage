@@ -204,13 +204,19 @@ export async function scorePlan(solid: Manifold, preset: PlanPreset, cuts: CutSp
     });
     if (idx < 0) continue;
     const [f, bk] = splitSolid(parts[idx].s, c.plane);
-    if (f.isEmpty() || bk.isEmpty()) continue;
+    if (f.isEmpty() || bk.isEmpty()) { f.delete(); bk.delete(); continue; }
     const n = c.plane.normal;
+    const old = parts[idx].s;
     parts.splice(idx, 1,
       { s: bk, faces: [...parts[idx].faces, n] },
       { s: f, faces: [...parts[idx].faces, [-n[0], -n[1], -n[2]]] });
+    if (old !== solid) old.delete();
   }
-  parts = parts.flatMap((p) => p.s.decompose().map((s) => ({ s, faces: p.faces })));
+  parts = parts.flatMap((p) => {
+    const islands = p.s.decompose();
+    if (p.s !== solid) p.s.delete();
+    return islands.map((s) => ({ s, faces: p.faces }));
+  });
   const allFit = parts.every((p) => fitsPrinterAnyOrientation(size(p.s), printer));
   let support = 0, area = 0;
   for (const p of parts) {
@@ -218,7 +224,7 @@ export async function scorePlan(solid: Manifold, preset: PlanPreset, cuts: CutSp
     support += est.overhangArea;
     area += est.totalArea;
   }
-  for (const p of parts) if (p.s !== solid) p.s.delete();
+  for (const p of parts) p.s.delete();
   const supportFrac = area > 0 ? support / area : 0;
   const hidden = cuts.length ? cuts.reduce((s, c) => s + Math.min(1, c.neck / 0.6), 0) / cuts.length : 1;
   const printability = (allFit ? 1 : 0.3) * Math.max(0, 1 - supportFrac * 2.5);

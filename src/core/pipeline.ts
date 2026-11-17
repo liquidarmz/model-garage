@@ -73,7 +73,7 @@ export async function buildParts(
       const b = solidBounds(target.solid);
       if (!contains(b, cut.anchor, 0.5)) continue;
       let [front, back] = splitSolid(target.solid, cut.plane);
-      if (front.isEmpty() || back.isEmpty()) continue;
+      if (front.isEmpty() || back.isEmpty()) { front.delete(); back.delete(); continue; }
       const section = sectionAt(target.solid, cut.plane);
       const area = section.area();
       // A plane can cut through several disconnected regions of the part; only
@@ -81,6 +81,8 @@ export async function buildParts(
       const settings = cut.connector ?? connectors;
       if (settings && settings.type !== 'none') {
         const res = await addConnectors(back, front, cut.plane, settings, section);
+        if (res.back !== back) back.delete();
+        if (res.front !== front) front.delete();
         back = res.back;
         front = res.front;
         connectorsPlaced += res.placed;
@@ -104,6 +106,8 @@ export async function buildParts(
         p.faces = p.faces.filter((f) => f.cutId === cut.id || touchesFace(pb, f, cuts));
       }
       parts = parts.flatMap((p) => (p === target ? [backPart, frontPart] : [p]));
+      section.delete();
+      if (target.solid !== base) target.solid.delete();
       done = true;
       break;
     }
@@ -114,11 +118,15 @@ export async function buildParts(
   for (const p of parts) {
     if (p.kind !== 'part') { final.push(p); continue; }
     const islands = p.solid.decompose();
-    if (islands.length <= 1) final.push(p);
-    else for (const s of islands) {
+    if (islands.length <= 1) {
+      for (const s of islands) s.delete();
+      // Never hand back the caller's base solid: callers free the parts they get.
+      final.push(p.solid === base ? { ...p, solid: base.translate([0, 0, 0]) } : p);
+    } else for (const s of islands) {
       const sb = solidBounds(s);
       final.push({ id: newId('p'), name: '', kind: 'part', solid: s, faces: p.faces.filter((f) => touchesFace(sb, f, cuts)) });
     }
+    if (islands.length > 1 && p.solid !== base) p.solid.delete();
   }
   let i = 0;
   for (const p of final) if (p.kind === 'part') p.name = `Part ${++i}`;
@@ -141,8 +149,9 @@ function touchesFace(b: { min: Vec3; max: Vec3 }, f: CutFace, cuts: CutSpec[]): 
 /** World-space centroid of a section, used as a cut's anchor. */
 export function sectionAnchor(solid: Manifold, plane: Plane): Vec3 | null {
   const cs = sectionAt(solid, plane);
-  if (cs.isEmpty()) return null;
+  if (cs.isEmpty()) { cs.delete(); return null; }
   const { centroid } = sectionShape(cs);
+  cs.delete();
   const { u, v, n } = planeBasis(plane.normal);
   return [0, 1, 2].map((k) => u[k] * centroid[0] + v[k] * centroid[1] + n[k] * plane.offset) as Vec3;
 }

@@ -1,16 +1,15 @@
 import { create } from 'zustand';
-import type { Manifold } from 'manifold-3d';
-import { toSolid, fromSolid, solidBounds, getKernel } from '../core/geometry';
-import { loadModel } from '../core/loaders';
-import { type TriMesh, type MeshHealth, analyzeMesh, type Vec3 } from '../core/mesh';
+import type { TriMesh, MeshHealth, Vec3 } from '../core/mesh';
 import { type PrinterProfile, DEFAULT_PRINTER, PRINTERS, fitsPrinterAnyOrientation } from '../core/printers';
-import { type SplitPlan, suggestPlans, scorePlan, PRESETS } from '../core/smartcut';
-import { type CutSpec, type CutFace, buildParts, newId, sectionAnchor, shiftCut, tiltCut } from '../core/pipeline';
+import type { SplitPlan } from '../core/smartcut';
+import { type CutSpec, type CutFace, newId, shiftCut, tiltCut } from '../core/pipeline';
 import { type ConnectorSettings, DEFAULT_CONNECTOR } from '../core/connectors';
 import { PaintTarget, DEFAULT_PALETTE } from '../core/paint';
-import { layoutOnPlates } from '../core/orient';
 import { export3mf } from '../core/export3mf';
-import { sampleFigure } from '../core/samples';
+import type { BaseData, Bounds, PartData } from '../core/engine';
+import { createEngine } from './engineClient';
+
+const engine = createEngine();
 
 export type Step = 'drop' | 'chop' | 'connect' | 'paint' | 'print';
 export const STEPS: { id: Step; label: string }[] = [
@@ -27,7 +26,7 @@ export interface PartView {
   id: string;
   name: string;
   kind: 'part' | 'pin';
-  solid: Manifold;
+  bounds: Bounds;
   mesh: TriMesh;
   paint: PaintTarget;
   faces: CutFace[];
@@ -53,7 +52,8 @@ interface State {
   error: string | null;
   notice: string | null;
   fileName: string | null;
-  base: Manifold | null;
+  /** The loaded model (geometry itself lives in the worker). */
+  base: { bounds: Bounds } | null;
   health: MeshHealth | null;
   repairs: string[];
   plans: SplitPlan[];
@@ -85,7 +85,7 @@ interface State {
   moveCut(id: string, offset: number): void;
   tiltCutBy(id: string, axis: Vec3, degrees: number): void;
   removeCut(id: string): void;
-  addManualCut(normal: Vec3, offset: number): void;
+  addManualCut(normal: Vec3, offset: number): Promise<void>;
   commitCuts(): Promise<void>;
   setConnector(patch: Partial<ConnectorSettings>): void;
   setCutConnector(id: string, patch: Partial<ConnectorSettings> | null): void;
@@ -98,25 +98,26 @@ interface State {
   selectPart(id: string | null): void;
   scaleModel(factor: number): Promise<void>;
   mirrorModel(axis: 0 | 1 | 2): Promise<void>;
-  layout(): void;
+  layout(): Promise<void>;
   exportProject(): Promise<void>;
   dismissNotice(): void;
 }
 
 const yieldFrame = () => new Promise((r) => setTimeout(r, 30));
 
-function makePartView(p: { id: string; name: string; kind: 'part' | 'pin'; solid: Manifold; faces: CutFace[] }, printer: PrinterProfile, slot = 0): PartView {
-  const mesh = fromSolid(p.solid);
-  const b = solidBounds(p.solid);
+function makePartView(p: PartData, printer: PrinterProfile, slot = 0): PartView {
+  const b = p.bounds;
   const size: Vec3 = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]];
-  const paint = new PaintTarget(mesh);
+  const paint = new PaintTarget(p.mesh);
   if (slot) paint.fillAll(slot);
-  return { ...p, mesh, paint, size, fits: fitsPrinterAnyOrientation(size, printer), version: 0 };
+  return { ...p, paint, size, fits: fitsPrinterAnyOrientation(size, printer), version: 0 };
 }
+export type { CutFace };
 
 let rebuildToken = 0;
 
 export const useStore = create<State>((set, get) => {
+  engine.onProgress = (label) => { if (get().busy) set({ busy: label }); };
   const run = async <T,>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
     set({ busy: label, error: null });
     await yieldFrame();
@@ -136,21 +137,17 @@ export const useStore = create<State>((set, get) => {
     const { base, cuts, connector, printer } = get();
     if (!base) return;
     const token = ++rebuildToken;
-    const res = await buildParts(base, cuts, withConnectors ? connector : null);
+    const res = await engine.build(cuts, withConnectors ? connector : null);
     if (token !== rebuildToken) return;
     const parts = res.parts.map((p) => makePartView(p, printer));
     set({ parts, warnings: res.warnings, connectorsApplied: withConnectors, placed: [] });
   };
 
-  const setBase = async (solid: Manifold, name: string, repairs: string[]) => {
-    // Sit the model on the plate, centered.
-    const b = solidBounds(solid);
-    const centered = solid.translate([-(b.min[0] + b.max[0]) / 2, -(b.min[1] + b.max[1]) / 2, -b.min[2]]);
-    const mesh = fromSolid(centered);
+  const setBase = (d: BaseData) => {
     set({
-      base: centered, fileName: name, health: analyzeMesh(mesh), repairs,
+      base: { bounds: d.bounds }, fileName: d.fileName, health: d.health, repairs: d.repairs,
       plans: [], selectedPlanId: null, cuts: [], selectedCutId: null, connectorsApplied: false,
-      parts: [makePartView({ id: 'p0', name: 'Part 1', kind: 'part', solid: centered, faces: [] }, get().printer)],
+      parts: [makePartView(d.part, get().printer)],
       warnings: [], placed: [], selectedPartId: null, explode: 0,
     });
   };
@@ -191,7 +188,7 @@ export const useStore = create<State>((set, get) => {
       set({ step });
       if (step === 'chop' && s.base && !s.plans.length && !s.busy) void get().suggest();
       if (step === 'connect' && s.explode < 0.2) set({ explode: 0.35 });
-      if (step === 'print') get().layout();
+      if (step === 'print') void get().layout();
     },
     setPrinter: (id) => {
       const printer = PRINTERS.find((p) => p.id === id) ?? DEFAULT_PRINTER;
@@ -207,18 +204,13 @@ export const useStore = create<State>((set, get) => {
     loadFile: async (file) => {
       await run(`Reading ${file.name}`, async () => {
         const buf = await file.arrayBuffer();
-        const mesh = await loadModel(file.name, buf);
-        set({ busy: 'Checking and repairing the mesh' });
-        await yieldFrame();
-        const { solid, repaired } = await toSolid(mesh);
-        await setBase(solid, file.name, repaired);
+        setBase(await engine.load(file.name, buf));
       });
       if (get().base) get().setStep('chop');
     },
     loadSample: async () => {
       await run('Building the sample figure', async () => {
-        const fig = await sampleFigure(300);
-        await setBase(fig, 'Sample figure (300 mm)', []);
+        setBase(await engine.sample(300));
       });
       if (get().base) get().setStep('chop');
     },
@@ -226,7 +218,7 @@ export const useStore = create<State>((set, get) => {
       const { base, printer } = get();
       if (!base) return;
       await run('Finding the best places to cut', async () => {
-        const plans = await suggestPlans(base, printer);
+        const plans = await engine.suggest(printer);
         set({ plans });
         if (plans.length) {
           const best = [...plans].sort((a, b) => b.scores.overall - a.scores.overall)[0];
@@ -253,11 +245,11 @@ export const useStore = create<State>((set, get) => {
       set((s) => ({ cuts: s.cuts.filter((c) => c.id !== id), selectedCutId: null, selectedPlanId: null }));
       void get().commitCuts();
     },
-    addManualCut: (normal, offset) => {
+    addManualCut: async (normal, offset) => {
       const { base } = get();
       if (!base) return;
       const plane = { normal, offset };
-      const anchor = sectionAnchor(base, plane);
+      const anchor = await engine.anchor(plane);
       if (!anchor) { set({ error: 'That plane does not cross the model.' }); return; }
       const cut: CutSpec = { id: newId('cut'), plane, anchor, neck: 0, reasons: ['Your cut'] };
       set((s) => ({ cuts: [...s.cuts, cut], selectedCutId: cut.id, selectedPlanId: null }));
@@ -298,36 +290,32 @@ export const useStore = create<State>((set, get) => {
     },
     selectPart: (id) => set({ selectedPartId: id }),
     scaleModel: async (factor) => {
-      const { base, fileName } = get();
-      if (!base) return;
-      await run('Scaling', async () => setBase(base.scale([factor, factor, factor]), fileName ?? 'Model', []));
+      if (!get().base) return;
+      await run('Scaling', async () => setBase(await engine.scale(factor)));
       if (get().step === 'chop') await get().suggest();
     },
     mirrorModel: async (axis) => {
-      const { base, fileName } = get();
-      if (!base) return;
-      const n: Vec3 = [0, 0, 0];
-      n[axis] = 1;
-      await run('Mirroring', async () => setBase(base.mirror(n), fileName ?? 'Model', get().repairs));
+      if (!get().base) return;
+      await run('Mirroring', async () => setBase(await engine.mirror(axis)));
     },
-    layout: () => {
+    layout: async () => {
       const { parts, printer } = get();
       if (!parts.length) return;
-      const placed = layoutOnPlates(parts, printer);
-      const byId = new Map(parts.map((p) => [p.id, p]));
+      const placed = await engine.layout(printer);
+      const byId = new Map(get().parts.map((p) => [p.id, p]));
       set({
-        placed: placed.map((pp) => {
-          const part = byId.get(pp.id)!;
+        placed: placed.flatMap((pp) => {
+          const part = byId.get(pp.id);
+          if (!part) return [];
           // Orientation/translation is rigid, so triangle order (and paint) is kept.
-          const mesh = fromSolid(pp.solid);
-          const colors = mesh.indices.length === part.mesh.indices.length ? part.paint.colors : new Uint8Array(mesh.indices.length / 3);
-          return { id: pp.id, name: part.name, mesh, colors, plate: pp.plate };
+          const colors = pp.mesh.indices.length === part.mesh.indices.length ? part.paint.colors : new Uint8Array(pp.mesh.indices.length / 3);
+          return [{ id: pp.id, name: part.name, mesh: pp.mesh, colors, plate: pp.plate }];
         }),
       });
     },
     exportProject: async () => {
       await run('Writing 3MF', async () => {
-        if (!get().placed.length) get().layout();
+        if (!get().placed.length) await get().layout();
         const { placed, palette, slotCount, fileName } = get();
         const bytes = await export3mf(
           placed.map((p) => ({ name: p.name, mesh: p.mesh, colors: p.colors })),
@@ -348,6 +336,3 @@ export const useStore = create<State>((set, get) => {
   };
 });
 
-// Warm up the geometry kernel early so the first drop feels instant.
-void getKernel();
-export { PRESETS, scorePlan };

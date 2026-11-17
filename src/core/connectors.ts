@@ -237,14 +237,24 @@ export async function addConnectors(
       }
     }
   }
-  const place = (list: Manifold[]) => wasm.Manifold.union(list).transform(toWorld);
+  const place = (list: Manifold[]) => {
+    const u = wasm.Manifold.union(list);
+    const out = u.transform(toWorld);
+    u.delete();
+    for (const m of new Set(list)) m.delete();
+    return out;
+  };
+  // Apply a boolean, freeing the tool and any intermediate (never the caller's inputs).
+  const apply = (cur: Manifold, orig: Manifold, op: 'add' | 'subtract', tool: Manifold) => {
+    const next = cur[op](tool);
+    tool.delete();
+    if (cur !== orig) cur.delete();
+    return next;
+  };
   let newBack = back, newFront = front;
-  if (addBack.length) {
-    // Keep pegs inside the opposite part's footprint so they never poke out.
-    newBack = newBack.add(place(addBack));
-  }
-  if (cutBack.length) newBack = newBack.subtract(place(cutBack));
-  if (cutFront.length) newFront = newFront.subtract(place(cutFront));
+  if (addBack.length) newBack = apply(newBack, back, 'add', place(addBack));
+  if (cutBack.length) newBack = apply(newBack, back, 'subtract', place(cutBack));
+  if (cutFront.length) newFront = apply(newFront, front, 'subtract', place(cutFront));
   return { back: newBack, front: newFront, extras, placed: pts.length, diameter: d, warning };
 }
 

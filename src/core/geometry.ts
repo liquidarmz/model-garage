@@ -81,7 +81,7 @@ export async function toSolid(mesh: TriMesh): Promise<SolidResult> {
       const mm = new wasm.Mesh({ numProp: 3, vertProperties: m.positions, triVerts: m.indices });
       mm.merge();
       const solid = new wasm.Manifold(mm);
-      if (solid.status() !== 'NoError' || solid.isEmpty()) return null;
+      if (solid.status() !== 'NoError' || solid.isEmpty()) { solid.delete(); return null; }
       return solid;
     } catch {
       return null;
@@ -112,9 +112,12 @@ export async function toSolid(mesh: TriMesh): Promise<SolidResult> {
     const keep = parts.filter((p) => p.volume() > total * 0.001);
     if (keep.length < parts.length) {
       repaired.push(`Removed ${parts.length - keep.length} loose speck${parts.length - keep.length > 1 ? 's' : ''}`);
+      const old = solid;
       solid = wasm.Manifold.union(keep);
+      old.delete();
     }
   }
+  for (const p of parts) p.delete();
   return { solid, repaired };
 }
 

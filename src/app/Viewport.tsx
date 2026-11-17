@@ -109,7 +109,7 @@ function CutPlanes() {
   const selectCut = useStore((s) => s.selectCut);
   const radius = useMemo(() => {
     if (!base) return 50;
-    const b = base.boundingBox();
+    const b = base.bounds;
     return Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) * 0.38;
   }, [base]);
   if (step !== 'chop' || !base) return null;
@@ -182,7 +182,7 @@ function FitCamera() {
       center = new THREE.Vector3(totalW / 2, printer.volume[1] / 2, 0);
       size = Math.max(totalW, printer.volume[1]);
     } else if (base) {
-      const b = base.boundingBox();
+      const b = base.bounds;
       center = new THREE.Vector3(0, 0, (b.max[2] + b.min[2]) / 2);
       size = Math.max(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2], 120);
     }
@@ -212,7 +212,7 @@ export default function Viewport() {
   const offsets = useMemo(() => {
     const out = new Map<string, Vec3>();
     if (!base) return out;
-    const b = base.boundingBox();
+    const b = base.bounds;
     const c: Vec3 = [(b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2];
     const scale = Math.max(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]);
     let pinIdx = 0;
@@ -223,7 +223,7 @@ export default function Viewport() {
         pinIdx++;
         continue;
       }
-      const pb = p.solid.boundingBox();
+      const pb = p.bounds;
       const pc: Vec3 = [(pb.min[0] + pb.max[0]) / 2, (pb.min[1] + pb.max[1]) / 2, (pb.min[2] + pb.max[2]) / 2];
       const d: Vec3 = [pc[0] - c[0], pc[1] - c[1], pc[2] - c[2]];
       const len = Math.hypot(...d) || 1;

@@ -209,6 +209,35 @@ interface Obj3mf {
  * in separate model files) and build-item transforms, and returns one merged
  * mesh in plate coordinates.
  */
+/**
+ * Read three numeric attributes from every <tag .../> element. Uses a fast
+ * regex for the usual attribute order and falls back to a general one.
+ */
+function readTriples(xml: string, tag: string, a: string, b: string, c: string): number[] {
+  // Hand-rolled scan: much faster than regex on 100+ MB model files.
+  const out: number[] = [];
+  const open = `<${tag}`;
+  const keys = [` ${a}="`, ` ${b}="`, ` ${c}="`];
+  let i = xml.indexOf(open);
+  while (i >= 0) {
+    const close = xml.indexOf('>', i);
+    if (close < 0) break;
+    for (const k of keys) {
+      let at = xml.indexOf(k, i);
+      if (at < 0 || at > close) {
+        // Attribute separated by a tab/newline: fall back to the regex helper.
+        const v = attr(xml.slice(i, close), k.trim().slice(0, -2));
+        out.push(v === undefined ? NaN : +v);
+        continue;
+      }
+      at += k.length;
+      out.push(+xml.slice(at, xml.indexOf('"', at)));
+    }
+    i = xml.indexOf(open, close);
+  }
+  return out;
+}
+
 export async function parse3MF(data: ArrayBuffer): Promise<TriMesh> {
   const zip = await JSZip.loadAsync(data);
   const modelFiles = Object.keys(zip.files).filter((f) => f.toLowerCase().endsWith('.model'));
@@ -228,15 +257,7 @@ export async function parse3MF(data: ArrayBuffer): Promise<TriMesh> {
       const o: Obj3mf = { components: [] };
       const meshM = /<mesh>([\s\S]*?)<\/mesh>/.exec(body);
       if (meshM) {
-        const verts: number[] = [];
-        const vRe = /<vertex\b([^>]*)\/>/g;
-        let vm: RegExpExecArray | null;
-        while ((vm = vRe.exec(meshM[1]))) verts.push(+attr(vm[1], 'x')!, +attr(vm[1], 'y')!, +attr(vm[1], 'z')!);
-        const idx: number[] = [];
-        const tRe = /<triangle\b([^>]*)\/>/g;
-        let tm: RegExpExecArray | null;
-        while ((tm = tRe.exec(meshM[1]))) idx.push(+attr(tm[1], 'v1')!, +attr(tm[1], 'v2')!, +attr(tm[1], 'v3')!);
-        o.mesh = { positions: new Float32Array(verts), indices: new Uint32Array(idx) };
+        o.mesh = { positions: new Float32Array(readTriples(meshM[1], 'vertex', 'x', 'y', 'z')), indices: new Uint32Array(readTriples(meshM[1], 'triangle', 'v1', 'v2', 'v3')) };
       }
       const cRe = /<component\b([^>]*)\/>/g;
       let cm: RegExpExecArray | null;
