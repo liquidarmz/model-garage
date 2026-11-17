@@ -8,6 +8,7 @@ import { PaintTarget, DEFAULT_PALETTE } from '../core/paint';
 import { export3mf } from '../core/export3mf';
 import type { BaseData, Bounds, PartData } from '../core/engine';
 import { createEngine } from './engineClient';
+import { saveFile } from './saveFile';
 
 const engine = createEngine();
 
@@ -329,15 +330,10 @@ export const useStore = create<State>((set, get) => {
           placed.map((p) => ({ name: p.name, mesh: p.mesh, colors: p.colors })),
           palette.slice(0, slotCount),
         );
-        const blob = new Blob([bytes as BlobPart], { type: 'model/3mf' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
         const stem = (fileName ?? 'model').replace(/\.[^.]+$/, '').replace(/[^\w-]+/g, '_');
-        a.download = `${stem}_model-garage${plate !== undefined ? `_plate${plate + 1}` : ''}.3mf`;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        const saved = await saveFile(`${stem}_model-garage${plate !== undefined ? `_plate${plate + 1}` : ''}.3mf`, bytes);
         const tip = plate === undefined && plates > 1 ? ` ${printer.slicer} opens all ${plates} plates' parts on one bed; download plates one at a time to keep them separate.` : '';
-        set({ notice: `Saved ${a.download} with ${placed.length} pieces. Open it in ${printer.slicer}.${tip}` });
+        set({ notice: `Saved ${saved} with ${placed.length} pieces. Open it in ${printer.slicer}.${tip}` });
       });
     },
     dismissNotice: () => set({ notice: null, error: null }),
