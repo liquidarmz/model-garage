@@ -64,14 +64,23 @@ src/core/       geometry kernel, no UI (tested in Node)
   orient.ts       print orientation, support estimate, plate layout
   paint.ts        per-triangle filament painting
   export3mf.ts    3MF writer with slicer paint codes
-  printers.ts     printer profiles
+  printers.ts     printer profiles, slicer plate grid
+  engine.ts       owns all solids for the open model (frees WASM memory)
+  worker.ts       runs the engine in a Web Worker
 src/app/        React UI (store, viewport, panels)
 tests/          Vitest suite
 ```
 
+## Tested
+
+- Liquid's Gear5 figure (1.45M triangles): loads in about 5 s, plans in about 7 s, cuts with dowels in about 10 s per plan, all off the main thread.
+- Sample figure plate 1 export opened in Bambu Studio on the bed with painted colors and sliced with 3 filaments.
+- Benchmark your own files: `REAL_MODELS=path/to/a.3mf SCALE=2 npx vitest run tests/real.bench.test.ts`
+
 ## Next up
 
-- Run the geometry in a Web Worker so big models never freeze the window
+- Reserve room for the slicer's prime tower when laying out multi-color plates
+- Write Bambu plate metadata so one file can hold several plates
 - Curved and outline cuts, and learned part detection for organic models
 - Hollowing, wall-thickness check, articulated joints, text/logo emboss
 - Desktop app (Tauri) with send-to-slicer
