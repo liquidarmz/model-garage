@@ -12,6 +12,10 @@ export default function App() {
   const dismiss = useStore((s) => s.dismissNotice);
   const loadFile = useStore((s) => s.loadFile);
   const base = useStore((s) => s.base);
+  const picture = useStore((s) => s.picture);
+  const pictureOpacity = useStore((s) => s.pictureOpacity);
+  const pictureScale = useStore((s) => s.pictureScale);
+  const pictureOffset = useStore((s) => s.pictureOffset);
   const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
@@ -21,7 +25,12 @@ export default function App() {
       e.preventDefault();
       setDragging(false);
       const f = e.dataTransfer?.files?.[0];
-      if (f) void loadFile(f);
+      if (!f) return;
+      // A dropped picture becomes the paint reference; anything else is a model.
+      if (f.type.startsWith('image/') && useStore.getState().base) {
+        void useStore.getState().setPicture(f);
+        useStore.getState().setStep('paint');
+      } else void loadFile(f);
     };
     window.addEventListener('dragover', over);
     window.addEventListener('dragleave', leave);
@@ -43,6 +52,14 @@ export default function App() {
       <main className="main">
         <section className="view">
           <Viewport />
+          {step === 'paint' && picture && (
+            <img
+              className="picture-overlay"
+              src={picture.url}
+              alt=""
+              style={{ opacity: pictureOpacity, transform: `translate(${pictureOffset[0] * 100}%, ${pictureOffset[1] * 100}%) scale(${pictureScale})` }}
+            />
+          )}
           {!base && !busy && (
             <div className="empty">
               <div className="empty-box">

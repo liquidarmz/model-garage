@@ -8,6 +8,9 @@ import { PaintTarget, DEFAULT_PALETTE } from '../core/paint';
 import { export3mf } from '../core/export3mf';
 import type { BaseData, Bounds, PartData } from '../core/engine';
 import { createEngine } from './engineClient';
+import * as THREE from 'three';
+import { viewRegistry } from './viewRegistry';
+import { type RGB, type RGBImage, projectPicture, kmeansColors, nearest, hexToRgb, rgbToHex } from '../core/imagePaint';
 import { saveFile } from './saveFile';
 
 const engine = createEngine();
@@ -77,6 +80,13 @@ interface State {
   explode: number;
   selectedPartId: string | null;
   placed: PlacedView[];
+  /** Reference picture for paint-from-picture (object URL + pixels). */
+  picture: { url: string; name: string; image: RGBImage } | null;
+  pictureOpacity: number;
+  pictureScale: number;
+  pictureOffset: [number, number];
+  pictureColors: 'picture' | 'mine';
+  picturePaintBack: boolean;
 
   setMode(m: Mode): void;
   setStep(s: Step): void;
@@ -107,6 +117,24 @@ interface State {
   /** Download a 3MF: every plate, or only `plate` (0-based) moved onto a single bed. */
   exportProject(plate?: number): Promise<void>;
   dismissNotice(): void;
+  setPicture(file: File | null): Promise<void>;
+  setPictureOptions(patch: Partial<Pick<State, 'pictureOpacity' | 'pictureScale' | 'pictureOffset' | 'pictureColors' | 'picturePaintBack'>>): void;
+  applyPicture(): Promise<void>;
+  cleanupPaint(): void;
+}
+
+/** Decode a picture into pixels, at most 1024 px on its long side. */
+async function readPicture(url: string): Promise<RGBImage> {
+  const img = new Image();
+  img.src = url;
+  await img.decode();
+  const k = Math.min(1, 1024 / Math.max(img.naturalWidth, img.naturalHeight));
+  const w = Math.max(1, Math.round(img.naturalWidth * k)), h = Math.max(1, Math.round(img.naturalHeight * k));
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(img, 0, 0, w, h);
+  return { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data };
 }
 
 const yieldFrame = () => new Promise((r) => setTimeout(r, 30));
@@ -188,6 +216,12 @@ export const useStore = create<State>((set, get) => {
     explode: 0,
     selectedPartId: null,
     placed: [],
+    picture: null,
+    pictureOpacity: 0.5,
+    pictureScale: 1,
+    pictureOffset: [0, 0],
+    pictureColors: 'picture',
+    picturePaintBack: false,
 
     setMode: (mode) => set({ mode }),
     setStep: (step) => {
@@ -347,6 +381,82 @@ export const useStore = create<State>((set, get) => {
       });
     },
     dismissNotice: () => set({ notice: null, error: null }),
+    setPicture: async (file) => {
+      const old = get().picture;
+      if (old) URL.revokeObjectURL(old.url);
+      if (!file) { set({ picture: null }); return; }
+      const url = URL.createObjectURL(file);
+      try {
+        const image = await readPicture(url);
+        set({ picture: { url, name: file.name, image }, pictureScale: 1, pictureOffset: [0, 0] });
+      } catch {
+        URL.revokeObjectURL(url);
+        set({ error: `Could not read ${file.name} as a picture.` });
+      }
+    },
+    setPictureOptions: (patch) => set(patch),
+    applyPicture: async () => {
+      const s = get();
+      const cam = viewRegistry.camera;
+      if (!s.picture || !cam) return;
+      await run('Painting from the picture', async () => {
+        cam.updateMatrixWorld();
+        const viewProj = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+        const parts = s.parts.filter((p) => viewRegistry.meshes.has(p.id));
+        const projParts = parts.map((p) => {
+          const obj = viewRegistry.meshes.get(p.id)!;
+          obj.updateMatrixWorld();
+          return { positions: p.mesh.positions, indices: p.mesh.indices, matrixWorld: obj.matrixWorld.elements };
+        });
+        const camPos = new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
+        const seen = projectPicture(projParts, {
+          viewProj: viewProj.elements, cameraPos: [camPos.x, camPos.y, camPos.z],
+          width: viewRegistry.size.width, height: viewRegistry.size.height,
+        }, s.picture!.image, { paintBack: s.picturePaintBack, scale: s.pictureScale, offsetX: s.pictureOffset[0], offsetY: s.pictureOffset[1] });
+        const samples = seen.flat().filter((c): c is RGB => !!c);
+        if (!samples.length) throw new Error('The picture does not cover the model. Turn the model so it lines up with the picture, then try again.');
+        let palette = s.palette;
+        if (s.pictureColors === 'picture') {
+          const found = kmeansColors(samples, s.slotCount).map(rgbToHex);
+          palette = s.palette.map((c, i) => found[i] ?? c);
+        }
+        const pal = palette.slice(0, s.slotCount).map(hexToRgb);
+        // Surfaces the picture can't see keep their look: move them to the closest new color.
+        const oldPal = s.palette.slice(0, s.slotCount).map(hexToRgb);
+        const keep = oldPal.map((c) => nearest(c, pal));
+        let painted = 0;
+        parts.forEach((p, i) => {
+          const cols = seen[i];
+          const mask = new Uint8Array(cols.length);
+          for (let t = 0; t < cols.length; t++) {
+            const c = cols[t];
+            if (c) { p.paint.colors[t] = nearest(c, pal); mask[t] = 1; painted++; }
+            else if (palette !== s.palette) p.paint.colors[t] = keep[p.paint.colors[t]] ?? 0;
+          }
+          // Tidy only what the picture painted, so unseen sides don't bleed in.
+          p.paint.removeSpecks(Math.max(6, Math.round(cols.length / 4000)), mask);
+          p.paint.smooth(1, mask);
+        });
+        set({
+          palette,
+          parts: get().parts.map((p) => ({ ...p, version: p.version + 1 })),
+          placed: [],
+          notice: `Painted ${painted.toLocaleString()} surfaces from ${s.picture!.name}. Turn the model and apply again to cover other sides.`,
+        });
+      });
+    },
+    cleanupPaint: () => {
+      const parts = get().parts;
+      let changed = 0;
+      for (const p of parts) {
+        changed += p.paint.removeSpecks(Math.max(6, Math.round(p.paint.triCount / 2000)));
+        changed += p.paint.smooth(2);
+      }
+      set({ parts: parts.map((p) => ({ ...p, version: p.version + 1 })), placed: [], notice: changed ? `Cleaned up ${changed.toLocaleString()} surfaces.` : 'Nothing to clean up.' });
+    },
   };
 });
 
+
+// Handle for automated browser tests.
+(window as unknown as { __modelGarage?: unknown }).__modelGarage = useStore;

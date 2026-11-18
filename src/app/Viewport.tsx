@@ -5,6 +5,7 @@ import * as THREE from 'three';
 import { useStore, type PartView, type PlacedView } from './store';
 import { planeBasis } from '../core/geometry';
 import { plateOrigin } from '../core/printers';
+import { viewRegistry } from './viewRegistry';
 import type { TriMesh, Vec3 } from '../core/mesh';
 
 const PART_TINTS = ['#9FB7D9', '#E0A96D', '#9CCB9A', '#D99AB5', '#C9B6E4', '#E6D27A', '#8FD1CF', '#E39A8D'];
@@ -58,6 +59,11 @@ function PartMesh({ part, offset, tint, selected }: { part: PartView; offset: Ve
   const geom = useColoredGeometry(part.mesh, part.paint.colors, palette, part.version, tint);
   const painting = useRef(false);
   const ref = useRef<THREE.Mesh>(null);
+  useEffect(() => {
+    const m = ref.current;
+    if (m) viewRegistry.meshes.set(part.id, m);
+    return () => { if (viewRegistry.meshes.get(part.id) === m) viewRegistry.meshes.delete(part.id); };
+  }, [part.id]);
 
   const handle = (e: ThreeEvent<PointerEvent>) => {
     if (step !== 'paint' || e.faceIndex == null || !ref.current) return;
@@ -206,6 +212,15 @@ function FitCamera() {
   return null;
 }
 
+function RegisterView() {
+  const { camera, size } = useThree();
+  useEffect(() => {
+    viewRegistry.camera = camera;
+    viewRegistry.size = { width: size.width, height: size.height };
+  }, [camera, size]);
+  return null;
+}
+
 export default function Viewport() {
   const parts = useStore((s) => s.parts);
   const step = useStore((s) => s.step);
@@ -262,6 +277,7 @@ export default function Viewport() {
       </group>
       <OrbitControls makeDefault enableDamping dampingFactor={0.12} mouseButtons={{ LEFT: step === 'paint' ? undefined as never : THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: step === 'paint' ? THREE.MOUSE.ROTATE : THREE.MOUSE.PAN }} />
       <FitCamera />
+      <RegisterView />
       <GizmoHelper alignment="bottom-right" margin={[70, 70]}>
         <GizmoViewport axisColors={['#e5534b', '#57ab5a', '#539bf5']} labelColor="white" />
       </GizmoHelper>

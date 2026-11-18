@@ -320,6 +320,7 @@ export function PaintPanel() {
   const fillByPart = useStore((s) => s.fillPartsByIndex);
   const printer = useStore((s) => s.printer);
   const setStep = useStore((s) => s.setStep);
+  const cleanup = useStore((s) => s.cleanupPaint);
   return (
     <div className="panel-body">
       <h2>Paint</h2>
@@ -355,8 +356,61 @@ export function PaintPanel() {
         </label>
       )}
       <button className="ghost wide" onClick={fillByPart}>Color each part differently</button>
+      <button className="ghost wide" onClick={cleanup}>Clean up specks and jagged edges</button>
+      <PicturePaint />
       <ExplodeSlider />
       <button className="primary wide" onClick={() => setStep('print')}>Next: print</button>
+    </div>
+  );
+}
+
+function PicturePaint() {
+  const picture = useStore((s) => s.picture);
+  const opacity = useStore((s) => s.pictureOpacity);
+  const scale = useStore((s) => s.pictureScale);
+  const offset = useStore((s) => s.pictureOffset);
+  const colors = useStore((s) => s.pictureColors);
+  const back = useStore((s) => s.picturePaintBack);
+  const setPicture = useStore((s) => s.setPicture);
+  const setOpt = useStore((s) => s.setPictureOptions);
+  const apply = useStore((s) => s.applyPicture);
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <div className="card">
+      <div className="card-title">Paint from a picture</div>
+      <input ref={input} type="file" accept="image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) void setPicture(f); e.target.value = ''; }} />
+      {!picture ? (
+        <>
+          <p className="muted small">Load a photo or render of the character. Line the model up with it, and the colors get painted on and matched to your filaments.</p>
+          <button className="ghost wide" onClick={() => input.current?.click()}>Choose a picture</button>
+        </>
+      ) : (
+        <>
+          <p className="muted small">Turn and zoom the model (right-drag, scroll) until it lines up with <b>{picture.name}</b>, then apply.</p>
+          <label className="slider">See-through {Math.round(opacity * 100)}%
+            <input type="range" min={0.1} max={0.9} step={0.05} value={opacity} onChange={(e) => setOpt({ pictureOpacity: +e.target.value })} />
+          </label>
+          <label className="slider">Picture size {Math.round(scale * 100)}%
+            <input type="range" min={0.3} max={3} step={0.01} value={scale} onChange={(e) => setOpt({ pictureScale: +e.target.value })} />
+          </label>
+          <label className="slider">Move left / right
+            <input type="range" min={-0.5} max={0.5} step={0.005} value={offset[0]} onChange={(e) => setOpt({ pictureOffset: [+e.target.value, offset[1]] })} />
+          </label>
+          <label className="slider">Move up / down
+            <input type="range" min={-0.5} max={0.5} step={0.005} value={offset[1]} onChange={(e) => setOpt({ pictureOffset: [offset[0], +e.target.value] })} />
+          </label>
+          <div className="seg">
+            <button className={colors === 'picture' ? 'on' : ''} onClick={() => setOpt({ pictureColors: 'picture' })}>Colors from picture</button>
+            <button className={colors === 'mine' ? 'on' : ''} onClick={() => setOpt({ pictureColors: 'mine' })}>My filaments</button>
+          </div>
+          <label className="check"><input type="checkbox" checked={back} onChange={(e) => setOpt({ picturePaintBack: e.target.checked })} /> Paint the back the same (for symmetric models)</label>
+          <button className="primary wide" onClick={apply}>Apply picture</button>
+          <div className="row">
+            <button className="ghost" onClick={() => input.current?.click()}>Other picture</button>
+            <button className="ghost" onClick={() => setPicture(null)}>Remove</button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

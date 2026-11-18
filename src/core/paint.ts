@@ -94,6 +94,58 @@ export class PaintTarget {
     return changed;
   }
 
+  /** Replace each triangle's slot with the most common slot among it and its neighbors. */
+  smooth(passes = 1, mask?: Uint8Array): number {
+    const adj = this.buildAdjacency();
+    // With a mask, only masked triangles change and only masked neighbors vote.
+    const nb = (o: number) => (o < 0 || (mask && !mask[o]) ? -1 : o);
+    let changed = 0;
+    for (let p = 0; p < passes; p++) {
+      const prev = this.colors.slice();
+      for (let t = 0; t < prev.length; t++) {
+        if (mask && !mask[t]) continue;
+        const a = nb(adj[t * 3]), b = nb(adj[t * 3 + 1]), c = nb(adj[t * 3 + 2]);
+        const ca = a < 0 ? -1 : prev[a], cb = b < 0 ? -2 : prev[b], cc = c < 0 ? -3 : prev[c];
+        // Two or three neighbors agreeing on a different color wins.
+        let win = -1;
+        if (ca === cb || ca === cc) win = ca; else if (cb === cc) win = cb;
+        if (win >= 0 && win !== prev[t]) { this.colors[t] = win; changed++; }
+      }
+    }
+    return changed;
+  }
+
+  /** Merge same-colored islands smaller than `minTris` into the color around them. */
+  removeSpecks(minTris: number, mask?: Uint8Array): number {
+    const adj = this.buildAdjacency();
+    const n = this.colors.length;
+    const region = new Int32Array(n).fill(-1);
+    let changed = 0;
+    for (let s = 0; s < n; s++) {
+      if (region[s] >= 0 || (mask && !mask[s])) continue;
+      const slot = this.colors[s];
+      const members = [s];
+      region[s] = s;
+      const around = new Map<number, number>();
+      for (let i = 0; i < members.length; i++) {
+        const t = members[i];
+        for (let e = 0; e < 3; e++) {
+          const o = adj[t * 3 + e];
+          if (o < 0 || (mask && !mask[o])) continue;
+          if (this.colors[o] === slot) {
+            if (region[o] < 0) { region[o] = s; members.push(o); }
+          } else around.set(this.colors[o], (around.get(this.colors[o]) ?? 0) + 1);
+        }
+      }
+      if (members.length < minTris && around.size) {
+        const to = [...around.entries()].sort((a, b) => b[1] - a[1])[0][0];
+        for (const t of members) this.colors[t] = to;
+        changed += members.length;
+      }
+    }
+    return changed;
+  }
+
   usedSlots(): number[] {
     const used = new Set<number>();
     for (const c of this.colors) used.add(c);
