@@ -133,3 +133,13 @@ button.item.active { border-color: var(--accent); background: rgba(255, 140, 40,
 label.check { display: flex; gap: 8px; align-items: center; font-size: 13px; margin: 8px 0; }
 .row { display: flex; gap: 8px; margin-top: 8px; }
 .row > button { flex: 1; }
+
+.plan-wait { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted, #9aa3b2); margin: 8px 0; }
+.plan-wait button { margin-left: auto; }
+.plan { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.plan-colors { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.plan-colors li { display: flex; align-items: center; gap: 8px; }
+.plan-colors input[type=color] { width: 28px; height: 24px; padding: 0; border: none; background: none; cursor: pointer; }
+.plan-colors .plan-name { flex: 1; min-width: 0; background: transparent; border: 1px solid transparent; border-radius: 4px; color: inherit; padding: 2px 4px; font: inherit; font-size: 13px; }
+.plan-colors .plan-name:hover, .plan-colors .plan-name:focus { border-color: rgba(255,255,255,.15); outline: none; }
+.plan-colors small { color: var(--muted, #9aa3b2); width: 34px; text-align: right; }

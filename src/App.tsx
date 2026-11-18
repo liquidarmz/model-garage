@@ -16,6 +16,8 @@ export default function App() {
   const pictureOpacity = useStore((s) => s.pictureOpacity);
   const pictureScale = useStore((s) => s.pictureScale);
   const pictureOffset = useStore((s) => s.pictureOffset);
+  const planPreview = useStore((s) => s.planPreview);
+  const showPlan = useStore((s) => s.showPlan);
   const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
@@ -55,9 +57,9 @@ export default function App() {
           {step === 'paint' && picture && (
             <img
               className="picture-overlay"
-              src={picture.url}
+              src={showPlan && planPreview ? planPreview : picture.url}
               alt=""
-              style={{ opacity: pictureOpacity, transform: `translate(${pictureOffset[0] * 100}%, ${pictureOffset[1] * 100}%) scale(${pictureScale})` }}
+              style={{ imageRendering: showPlan && planPreview ? 'pixelated' : undefined, opacity: showPlan && planPreview ? Math.max(pictureOpacity, 0.7) : pictureOpacity, transform: `translate(${pictureOffset[0] * 100}%, ${pictureOffset[1] * 100}%) scale(${pictureScale})` }}
             />
           )}
           {!base && !busy && (

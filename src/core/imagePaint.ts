@@ -185,6 +185,8 @@ export interface ProjectOptions {
   scale?: number;
   offsetX?: number;
   offsetY?: number;
+  /** Treat a solid border color as backdrop and skip it (default true). */
+  backdrop?: boolean;
 }
 
 /** Where the picture sits on the canvas, in canvas pixels (object-fit: contain, then scale/offset). */
@@ -249,7 +251,7 @@ export function projectPicture(parts: ProjectPart[], view: ProjectView, img: RGB
     }
   }
   const rect = pictureRect(img, view, opts);
-  const bg = borderColor(img);
+  const bg = opts.backdrop === false ? null : borderColor(img);
   const bgLab = bg ? rgbToLab(bg) : null;
   const sample = (ndcX: number, ndcY: number): RGB | null => {
     const px = ((ndcX + 1) / 2) * view.width, py = ((1 - ndcY) / 2) * view.height;

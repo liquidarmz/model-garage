@@ -12,6 +12,8 @@ import * as THREE from 'three';
 import { viewRegistry } from './viewRegistry';
 import { type RGB, type RGBImage, projectPicture, kmeansColors, nearest, hexToRgb, rgbToHex } from '../core/imagePaint';
 import { saveFile } from './saveFile';
+import { type PaintPlan, type Segmentation, segmentPicture, planImage } from '../core/segment';
+import { getSampler, localPlan, claudePlan, imageToDataUrl } from './colorPlan';
 
 const engine = createEngine();
 
@@ -87,6 +89,13 @@ interface State {
   pictureOffset: [number, number];
   pictureColors: 'picture' | 'mine';
   picturePaintBack: boolean;
+  /** Picture split into regions (made when a plan is first asked for). */
+  pictureSeg: Segmentation | null;
+  /** Color plan waiting for approval, and a flat-color preview of it. */
+  picturePlan: PaintPlan | null;
+  planPreview: string | null;
+  showPlan: boolean;
+  planning: boolean;
 
   setMode(m: Mode): void;
   setStep(s: Step): void;
@@ -120,6 +129,10 @@ interface State {
   setPicture(file: File | null): Promise<void>;
   setPictureOptions(patch: Partial<Pick<State, 'pictureOpacity' | 'pictureScale' | 'pictureOffset' | 'pictureColors' | 'picturePaintBack'>>): void;
   applyPicture(): Promise<void>;
+  makePlan(withClaude: boolean): Promise<void>;
+  cancelPlan(): void;
+  setPlanColor(i: number, patch: { name?: string; hex?: string }): void;
+  clearPlan(): void;
   cleanupPaint(): void;
 }
 
@@ -149,6 +162,7 @@ function makePartView(p: PartData, printer: PrinterProfile, slot = 0): PartView 
 export type { CutFace };
 
 let rebuildToken = 0;
+let planAbort: AbortController | null = null;
 
 export const useStore = create<State>((set, get) => {
   engine.onProgress = (label) => { if (get().busy) set({ busy: label }); };
@@ -222,6 +236,11 @@ export const useStore = create<State>((set, get) => {
     pictureOffset: [0, 0],
     pictureColors: 'picture',
     picturePaintBack: false,
+    pictureSeg: null,
+    picturePlan: null,
+    planPreview: null,
+    showPlan: true,
+    planning: false,
 
     setMode: (mode) => set({ mode }),
     setStep: (step) => {
@@ -384,6 +403,8 @@ export const useStore = create<State>((set, get) => {
     setPicture: async (file) => {
       const old = get().picture;
       if (old) URL.revokeObjectURL(old.url);
+      planAbort?.abort();
+      set({ pictureSeg: null, picturePlan: null, planPreview: null, planning: false });
       if (!file) { set({ picture: null }); return; }
       const url = URL.createObjectURL(file);
       try {
@@ -394,11 +415,58 @@ export const useStore = create<State>((set, get) => {
         set({ error: `Could not read ${file.name} as a picture.` });
       }
     },
-    setPictureOptions: (patch) => set(patch),
+    setPictureOptions: (patch) => {
+      // A plan is made for one color mode; switching modes starts over.
+      if (patch.pictureColors && patch.pictureColors !== get().pictureColors) set({ picturePlan: null, planPreview: null });
+      set(patch);
+    },
+    makePlan: async (withClaude) => {
+      const s = get();
+      if (!s.picture || s.planning) return;
+      planAbort?.abort();
+      const ctl = new AbortController();
+      planAbort = ctl;
+      set({ planning: true, error: null, notice: null });
+      await yieldFrame();
+      try {
+        const seg = s.pictureSeg ?? segmentPicture(s.picture.image);
+        if (!seg.regions.length) throw new Error('Could not find the subject in this picture.');
+        set({ pictureSeg: seg });
+        const filaments = s.pictureColors === 'mine' ? s.palette.slice(0, s.slotCount) : null;
+        const maxColors = s.pictureColors === 'mine' ? s.slotCount : s.printer.maxColors;
+        const sample = withClaude ? await getSampler() : null;
+        if (withClaude && !sample) throw new Error('Claude is not available on this page. Use a quick plan instead.');
+        const plan = sample
+          ? await claudePlan(sample, s.picture.image, seg, { maxColors, filaments, signal: ctl.signal })
+          : localPlan(seg, Math.min(maxColors, Math.max(s.slotCount, 2)), filaments);
+        if (ctl.signal.aborted || get().picture !== s.picture) return;
+        set({ picturePlan: plan, planPreview: imageToDataUrl(planImage(seg, plan, hexToRgb)), showPlan: true });
+      } catch (e) {
+        if (ctl.signal.aborted) return;
+        const code = (e as { code?: string })?.code;
+        const msg = code === 'not_granted' ? 'Claude was not allowed to look at the picture. Use a quick plan instead.'
+          : code === 'rate_limited' ? 'Claude is busy right now. Try again in a minute, or use a quick plan.'
+          : code === 'invalid_json' ? 'Claude\'s answer could not be read. Try again.'
+          : code ? `Claude could not make a plan (${code}). Try again, or use a quick plan.`
+          : e instanceof Error ? e.message : String(e);
+        set({ error: msg });
+      } finally {
+        if (planAbort === ctl) { planAbort = null; set({ planning: false }); }
+      }
+    },
+    cancelPlan: () => { planAbort?.abort(); planAbort = null; set({ planning: false }); },
+    setPlanColor: (i, patch) => {
+      const { picturePlan: plan, pictureSeg: seg } = get();
+      if (!plan || !seg) return;
+      const next = { ...plan, colors: plan.colors.map((c, k) => (k === i ? { ...c, ...patch } : c)) };
+      set({ picturePlan: next, planPreview: patch.hex ? imageToDataUrl(planImage(seg, next, hexToRgb)) : get().planPreview });
+    },
+    clearPlan: () => set({ picturePlan: null, planPreview: null }),
     applyPicture: async () => {
       const s = get();
       const cam = viewRegistry.camera;
       if (!s.picture || !cam) return;
+      const plan = s.picturePlan, seg = s.pictureSeg;
       await run('Painting from the picture', async () => {
         cam.updateMatrixWorld();
         const viewProj = new THREE.Matrix4().multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
@@ -412,15 +480,22 @@ export const useStore = create<State>((set, get) => {
         const seen = projectPicture(projParts, {
           viewProj: viewProj.elements, cameraPos: [camPos.x, camPos.y, camPos.z],
           width: viewRegistry.size.width, height: viewRegistry.size.height,
-        }, s.picture!.image, { paintBack: s.picturePaintBack, scale: s.pictureScale, offsetX: s.pictureOffset[0], offsetY: s.pictureOffset[1] });
+        }, plan ? planImage(seg!, plan, hexToRgb) : s.picture!.image, {
+          paintBack: s.picturePaintBack, scale: s.pictureScale, offsetX: s.pictureOffset[0], offsetY: s.pictureOffset[1], backdrop: !plan,
+        });
         const samples = seen.flat().filter((c): c is RGB => !!c);
         if (!samples.length) throw new Error('The picture does not cover the model. Turn the model so it lines up with the picture, then try again.');
         let palette = s.palette;
-        if (s.pictureColors === 'picture') {
+        let slotCount = s.slotCount;
+        if (plan && s.pictureColors === 'picture') {
+          // The plan's colors become the filament slots.
+          slotCount = Math.min(s.printer.maxColors, Math.max(2, plan.colors.length));
+          palette = s.palette.map((c, i) => plan.colors[i]?.hex ?? c);
+        } else if (!plan && s.pictureColors === 'picture') {
           const found = kmeansColors(samples, s.slotCount).map(rgbToHex);
           palette = s.palette.map((c, i) => found[i] ?? c);
         }
-        const pal = palette.slice(0, s.slotCount).map(hexToRgb);
+        const pal = palette.slice(0, slotCount).map(hexToRgb);
         // Surfaces the picture can't see keep their look: move them to the closest new color.
         const oldPal = s.palette.slice(0, s.slotCount).map(hexToRgb);
         const keep = oldPal.map((c) => nearest(c, pal));
@@ -439,6 +514,8 @@ export const useStore = create<State>((set, get) => {
         });
         set({
           palette,
+          slotCount,
+          showPlan: false,
           parts: get().parts.map((p) => ({ ...p, version: p.version + 1 })),
           placed: [],
           notice: `Painted ${painted.toLocaleString()} surfaces from ${s.picture!.name}. Turn the model and apply again to cover other sides.`,

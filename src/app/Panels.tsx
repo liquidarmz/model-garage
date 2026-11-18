@@ -1,5 +1,6 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore, STEPS } from './store';
+import { getSampler } from './colorPlan';
 import { PRINTERS } from '../core/printers';
 import { CONNECTOR_INFO, type ConnectorType } from '../core/connectors';
 import { planeBasis } from '../core/geometry';
@@ -374,7 +375,23 @@ function PicturePaint() {
   const setPicture = useStore((s) => s.setPicture);
   const setOpt = useStore((s) => s.setPictureOptions);
   const apply = useStore((s) => s.applyPicture);
+  const plan = useStore((s) => s.picturePlan);
+  const planning = useStore((s) => s.planning);
+  const showPlan = useStore((s) => s.showPlan);
+  const makePlan = useStore((s) => s.makePlan);
+  const cancelPlan = useStore((s) => s.cancelPlan);
+  const clearPlan = useStore((s) => s.clearPlan);
+  const setPlanColor = useStore((s) => s.setPlanColor);
+  const seg = useStore((s) => s.pictureSeg);
+  const [canAsk, setCanAsk] = useState(false);
+  useEffect(() => { let live = true; void getSampler().then((s) => { if (live) setCanAsk(!!s); }); return () => { live = false; }; }, []);
   const input = useRef<HTMLInputElement>(null);
+  // Share of the subject each plan color covers.
+  const share = (k: number) => {
+    if (!plan || !seg) return 0;
+    const total = seg.regions.reduce((n, r) => n + r.area, 0) || 1;
+    return Math.round((seg.regions.reduce((n, r) => n + (plan.assign[r.id] === k ? r.area : 0), 0) / total) * 100);
+  };
   return (
     <div className="card">
       <div className="card-title">Paint from a picture</div>
@@ -404,7 +421,48 @@ function PicturePaint() {
             <button className={colors === 'mine' ? 'on' : ''} onClick={() => setOpt({ pictureColors: 'mine' })}>My filaments</button>
           </div>
           <label className="check"><input type="checkbox" checked={back} onChange={(e) => setOpt({ picturePaintBack: e.target.checked })} /> Paint the back the same (for symmetric models)</label>
-          <button className="primary wide" onClick={apply}>Apply picture</button>
+          {planning ? (
+            <div className="plan-wait">
+              <span className="spinner" /> {canAsk ? 'Claude is looking at the picture. This can take a minute.' : 'Finding the color regions…'}
+              <button className="ghost small" onClick={cancelPlan}>Stop</button>
+            </div>
+          ) : !plan ? (
+            <>
+              <p className="muted small">{canAsk
+                ? 'Claude can look at the picture, name each part and pick its filament, ignoring shadows, glare and logos. You check the plan before anything is painted.'
+                : 'Make a color plan to get clean edges between colors. You check it before anything is painted.'}</p>
+              {canAsk && <button className="primary wide" onClick={() => makePlan(true)}>Plan colors with Claude</button>}
+              <div className="row">
+                <button className={canAsk ? 'ghost' : 'primary'} onClick={() => makePlan(false)}>Quick plan{canAsk ? ' (no AI)' : ''}</button>
+                <button className="ghost" onClick={apply}>Paint without a plan</button>
+              </div>
+            </>
+          ) : (
+            <div className="plan">
+              <div className="card-title small">{plan.source === 'claude' ? "Claude's color plan" : 'Color plan'}</div>
+              <ul className="plan-colors">
+                {plan.colors.map((c, k) => {
+                  const pct = share(k);
+                  if (colors === 'mine' && !pct) return null;
+                  return (
+                    <li key={k}>
+                      <input type="color" value={c.hex} disabled={colors === 'mine'} onChange={(e) => setPlanColor(k, { hex: e.target.value })} title="Change this color" />
+                      <input className="plan-name" value={c.name} onChange={(e) => setPlanColor(k, { name: e.target.value })} />
+                      <small>{pct}%</small>
+                    </li>
+                  );
+                })}
+              </ul>
+              {plan.notes && <p className="muted small">{plan.notes}</p>}
+              {plan.assign.some((a) => a < 0) && <p className="muted small">Areas that aren't part of the model (background, logos) are left alone.</p>}
+              <label className="check"><input type="checkbox" checked={showPlan} onChange={(e) => useStore.setState({ showPlan: e.target.checked })} /> Show the plan over the model</label>
+              <button className="primary wide" onClick={apply}>Paint with this plan</button>
+              <div className="row">
+                {plan.source === 'claude' && <button className="ghost" onClick={() => makePlan(true)}>Ask Claude again</button>}
+                <button className="ghost" onClick={clearPlan}>Start over</button>
+              </div>
+            </div>
+          )}
           <div className="row">
             <button className="ghost" onClick={() => input.current?.click()}>Other picture</button>
             <button className="ghost" onClick={() => setPicture(null)}>Remove</button>
