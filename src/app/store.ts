@@ -57,6 +57,9 @@ interface State {
   base: { bounds: Bounds } | null;
   health: MeshHealth | null;
   repairs: string[];
+  /** Objects in the loaded file (3MF projects can hold several). */
+  items: { name: string; triangles: number }[];
+  item: number;
   plans: SplitPlan[];
   selectedPlanId: string | null;
   cuts: CutSpec[];
@@ -80,6 +83,7 @@ interface State {
   setPrinter(id: string): void;
   loadFile(file: File): Promise<void>;
   loadSample(): Promise<void>;
+  pickItem(index: number): Promise<void>;
   suggest(): Promise<void>;
   selectPlan(id: string): Promise<void>;
   selectCut(id: string | null): void;
@@ -147,7 +151,7 @@ export const useStore = create<State>((set, get) => {
 
   const setBase = (d: BaseData) => {
     set({
-      base: { bounds: d.bounds }, fileName: d.fileName, health: d.health, repairs: d.repairs,
+      base: { bounds: d.bounds }, fileName: d.fileName, health: d.health, repairs: d.repairs, items: d.items, item: d.item,
       plans: [], selectedPlanId: null, cuts: [], selectedCutId: null, connectorsApplied: false,
       parts: [makePartView(d.part, get().printer)],
       warnings: [], placed: [], selectedPartId: null, explode: 0,
@@ -165,6 +169,8 @@ export const useStore = create<State>((set, get) => {
     base: null,
     health: null,
     repairs: [],
+    items: [],
+    item: 0,
     plans: [],
     selectedPlanId: null,
     cuts: [],
@@ -208,7 +214,11 @@ export const useStore = create<State>((set, get) => {
         const buf = await file.arrayBuffer();
         setBase(await engine.load(file.name, buf));
       });
-      if (get().base) get().setStep('chop');
+      // With several objects in the file, stay here so the user can pick one.
+      if (get().base && get().items.length <= 1) get().setStep('chop');
+    },
+    pickItem: async (index) => {
+      await run('Loading that object', async () => setBase(await engine.pickItem(index)));
     },
     loadSample: async () => {
       await run('Building the sample figure', async () => {

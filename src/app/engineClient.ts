@@ -28,7 +28,7 @@ export function createEngine(): RemoteEngine {
     const transfer = args.filter((a): a is ArrayBuffer => a instanceof ArrayBuffer);
     worker.postMessage({ id, method, args }, transfer);
   });
-  for (const m of ['load', 'sample', 'scale', 'mirror', 'suggest', 'anchor', 'build', 'layout', 'dispose'] as EngineMethod[]) {
+  for (const m of ['load', 'pickItem', 'sample', 'scale', 'mirror', 'suggest', 'anchor', 'build', 'layout', 'dispose'] as EngineMethod[]) {
     (api as unknown as Record<string, unknown>)[m] = call(m);
   }
   return api;

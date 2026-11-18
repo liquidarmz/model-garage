@@ -1,3 +1,4 @@
+import { patchMesh } from './repair';
 import Module from 'manifold-3d';
 import type { ManifoldToplevel, Manifold, CrossSection } from 'manifold-3d';
 import { type TriMesh, type Vec3, weld, flipWinding, analyzeMesh } from './mesh';
@@ -70,13 +71,18 @@ export interface SolidResult {
 }
 
 /**
- * Turn a triangle mesh into a watertight solid. Tries progressively stronger
- * fixes: merge nearby vertices, flip if inside out, then a looser weld.
+ * Turn a triangle mesh (or a model's separate objects) into one watertight
+ * solid. Each object is fixed on its own (so touching objects are never
+ * welded into bad edges), trying progressively stronger repairs: flip if
+ * inside out, merge nearby points, cut out over-shared edges and close holes.
+ * The objects are then unioned, which also merges overlapping shells.
  */
-export async function toSolid(mesh: TriMesh): Promise<SolidResult> {
+export async function toSolid(input: TriMesh | TriMesh[], negatives: TriMesh[] = []): Promise<SolidResult> {
   const wasm = await getKernel();
-  const repaired: string[] = [];
+  const meshes = Array.isArray(input) ? input : [input];
+  const notes = new Set<string>();
   const attempt = (m: TriMesh): Manifold | null => {
+    if (!m.indices.length) return null;
     try {
       const mm = new wasm.Mesh({ numProp: 3, vertProperties: m.positions, triVerts: m.indices });
       mm.merge();
@@ -87,38 +93,72 @@ export async function toSolid(mesh: TriMesh): Promise<SolidResult> {
       return null;
     }
   };
-  let m = mesh;
-  const health = analyzeMesh(m);
-  if (health.volume < 0) {
-    m = flipWinding(m);
-    repaired.push('Turned inside-out faces the right way');
-  }
-  let solid = attempt(m);
-  if (!solid) {
-    for (const tol of [1e-3, 1e-2, 5e-2]) {
+  const fixOne = (input: TriMesh): Manifold | null => {
+    let m = input;
+    if (analyzeMesh(m).volume < 0) {
+      m = flipWinding(m);
+      notes.add('Turned inside-out faces the right way');
+    }
+    const first = attempt(m);
+    if (first) return first;
+    for (const tol of [1e-4, 1e-3, 1e-2, 5e-2]) {
       const welded = weld(m.positions, m.indices, tol);
-      solid = attempt(welded);
-      if (solid) {
-        repaired.push(`Closed tiny gaps (merged points within ${tol} mm)`);
-        break;
+      const s = attempt(welded);
+      if (s) { notes.add('Closed tiny gaps between points'); return s; }
+      // Cut out faces on edges shared by 3+ faces, close holes, and retry (twice: patching can expose more).
+      let cur = welded;
+      for (let pass = 0; pass < 3; pass++) {
+        const patched = patchMesh(cur);
+        if (!patched) break;
+        cur = weld(patched.mesh.positions, patched.mesh.indices, tol);
+        if (analyzeMesh(cur).volume < 0) cur = flipWinding(cur);
+        const ps = attempt(cur);
+        if (ps) {
+          if (patched.filled) notes.add('Filled holes in the surface');
+          if (patched.removed) notes.add('Rebuilt tangled faces');
+          return ps;
+        }
       }
     }
+    return null;
+  };
+  const solids: Manifold[] = [];
+  let failed = 0;
+  for (const m of meshes) {
+    const s = fixOne(m);
+    if (s) solids.push(s); else failed++;
   }
-  if (!solid) throw new Error('This model has holes or overlapping surfaces that could not be fixed automatically.');
+  if (!solids.length) throw new Error('This model has holes or overlapping surfaces that could not be fixed automatically.');
+  if (failed) notes.add(`Left out ${failed} piece${failed > 1 ? 's' : ''} that could not be repaired`);
+  let solid = solids.length === 1 ? solids[0] : wasm.Manifold.union(solids);
+  if (solids.length > 1) {
+    for (const x of solids) x.delete();
+    notes.add(`Joined ${solids.length} objects into one model`);
+  }
+  // Cut away the slicer's negative parts (holes the designer modeled as subtractions).
+  const cutters = negatives.map(fixOne).filter((x): x is Manifold => !!x);
+  if (cutters.length) {
+    const tool = wasm.Manifold.union(cutters);
+    const old = solid;
+    solid = old.subtract(tool);
+    old.delete(); tool.delete();
+    for (const c of cutters) c.delete();
+    notes.add(`Applied ${cutters.length} cut-out part${cutters.length > 1 ? 's' : ''} from the project`);
+  }
   const parts = solid.decompose();
   if (parts.length > 1) {
-    // Drop specks that are almost certainly noise (< 0.1% of total volume).
+    // Drop specks that are almost certainly noise (dust-sized bits under 0.05 mm³).
     const total = solid.volume();
-    const keep = parts.filter((p) => p.volume() > total * 0.001);
+    const keep = parts.filter((p) => p.volume() > Math.min(0.05, total * 1e-4));
     if (keep.length < parts.length) {
-      repaired.push(`Removed ${parts.length - keep.length} loose speck${parts.length - keep.length > 1 ? 's' : ''}`);
+      notes.add(`Removed ${parts.length - keep.length} loose speck${parts.length - keep.length > 1 ? 's' : ''}`);
       const old = solid;
       solid = wasm.Manifold.union(keep);
       old.delete();
     }
   }
   for (const p of parts) p.delete();
-  return { solid, repaired };
+  return { solid, repaired: [...notes] };
 }
 
 export function fromSolid(solid: Manifold): TriMesh {

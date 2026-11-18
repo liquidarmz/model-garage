@@ -9,6 +9,12 @@ export function formatFromName(name: string): ModelFormat | null {
   return null;
 }
 
+/** Load a model as its separate objects (3MF) so touching parts are not welded together. */
+export async function loadModelParts(name: string, data: ArrayBuffer): Promise<TriMesh[]> {
+  if (formatFromName(name) === '3mf') return parse3MFParts(data);
+  return [await loadModel(name, data)];
+}
+
 export async function loadModel(name: string, data: ArrayBuffer): Promise<TriMesh> {
   const fmt = formatFromName(name);
   switch (fmt) {
@@ -239,22 +245,42 @@ function readTriples(xml: string, tag: string, a: string, b: string, c: string):
 }
 
 export async function parse3MF(data: ArrayBuffer): Promise<TriMesh> {
+  return mergeMeshes(await parse3MFParts(data));
+}
+
+/** One printable object in a file (a 3MF build item), made of solid and cut-away parts. */
+export interface ModelItem {
+  name: string;
+  parts: TriMesh[];
+  /** Parts the slicer subtracts (negative volumes); modifiers are ignored. */
+  negatives: TriMesh[];
+}
+
+export async function parse3MFParts(data: ArrayBuffer): Promise<TriMesh[]> {
+  return (await parse3MFItems(data)).flatMap((i) => i.parts);
+}
+
+/**
+ * Read a 3MF as its build items. Model files are parsed one at a time so
+ * very large projects (hundreds of MB of XML) don't sit in memory at once.
+ */
+export async function parse3MFItems(data: ArrayBuffer): Promise<ModelItem[]> {
   const zip = await JSZip.loadAsync(data);
   const modelFiles = Object.keys(zip.files).filter((f) => f.toLowerCase().endsWith('.model'));
   if (!modelFiles.length) throw new Error('No 3D model found in this 3MF');
-  const objects = new Map<string, Obj3mf>(); // key: path#id
-  const texts: Record<string, string> = {};
+  const objects = new Map<string, Obj3mf & { other: boolean; name?: string }>(); // key: path#id
+  const rootFile = modelFiles.find((f) => /(^|\/)3D\/3dmodel\.model$/i.test(f)) ?? modelFiles[0];
+  let rootXml = '';
   for (const f of modelFiles) {
     const path = '/' + f.replace(/^\//, '');
-    texts[path] = await zip.files[f].async('string');
-  }
-  for (const [path, xml] of Object.entries(texts)) {
+    const xml = await zip.files[f].async('string');
+    if (f === rootFile) rootXml = xml;
     const objRe = /<object\b([^>]*)>([\s\S]*?)<\/object>/g;
     let om: RegExpExecArray | null;
     while ((om = objRe.exec(xml))) {
       const id = attr(om[1], 'id')!;
       const body = om[2];
-      const o: Obj3mf = { components: [] };
+      const o: Obj3mf & { other: boolean; name?: string } = { components: [], other: attr(om[1], 'type') === 'other', name: attr(om[1], 'name') };
       const meshM = /<mesh>([\s\S]*?)<\/mesh>/.exec(body);
       if (meshM) {
         o.mesh = { positions: new Float32Array(readTriples(meshM[1], 'vertex', 'x', 'y', 'z')), indices: new Uint32Array(readTriples(meshM[1], 'triangle', 'v1', 'v2', 'v3')) };
@@ -271,24 +297,56 @@ export async function parse3MF(data: ArrayBuffer): Promise<TriMesh> {
       objects.set(`${path}#${id}`, o);
     }
   }
-  const rootPath = Object.keys(texts).find((p) => /\/3D\/3dmodel\.model$/i.test(p)) ?? Object.keys(texts)[0];
-  const parts: TriMesh[] = [];
-  const emit = (path: string, id: string, mat: number[], depth: number) => {
+  // Bambu/Orca keep object names and part roles in model_settings.config.
+  const names = new Map<string, string>();
+  const negativeParts = new Set<string>();
+  const settings = Object.keys(zip.files).find((f) => /model_settings\.config$/i.test(f));
+  if (settings) {
+    const cfg = await zip.files[settings].async('string');
+    const objRe = /<object id="(\d+)">([\s\S]*?)<\/object>/g;
+    let m: RegExpExecArray | null;
+    while ((m = objRe.exec(cfg))) {
+      const name = /<metadata key="name" value="([^"]*)"\/>/.exec(m[2].split('<part')[0]);
+      if (name) names.set(m[1], name[1]);
+      const partRe = /<part id="(\d+)" subtype="(\w+)"/g;
+      let pm: RegExpExecArray | null;
+      while ((pm = partRe.exec(m[2]))) if (pm[2] === 'negative_part') negativeParts.add(pm[1]);
+    }
+  }
+  const rootPath = '/' + rootFile.replace(/^\//, '');
+  const items: ModelItem[] = [];
+  const emit = (item: ModelItem, path: string, id: string, mat: number[], depth: number) => {
     const o = objects.get(`${path}#${id}`);
     if (!o || depth > 16) return;
-    if (o.mesh) parts.push(transformMesh(o.mesh, mat));
-    for (const c of o.components) emit(c.path ?? path, c.objectId, mul(mat, c.transform), depth + 1);
+    if (o.mesh && o.mesh.indices.length) {
+      const m = transformMesh(o.mesh, mat);
+      if (!o.other) item.parts.push(m);
+      else if (negativeParts.has(id) || negativeParts.size === 0) item.negatives.push(m);
+    }
+    for (const c of o.components) emit(item, c.path ?? path, c.objectId, mul(mat, c.transform), depth + 1);
   };
   const buildRe = /<item\b([^>]*)\/>/g;
   let bm: RegExpExecArray | null;
-  let items = 0;
-  while ((bm = buildRe.exec(texts[rootPath]))) {
-    items++;
-    emit(attr(bm[1], 'p:path') ?? rootPath, attr(bm[1], 'objectid')!, parse3mfTransform(attr(bm[1], 'transform')), 0);
+  while ((bm = buildRe.exec(rootXml))) {
+    const id = attr(bm[1], 'objectid')!;
+    const path = attr(bm[1], 'p:path') ?? rootPath;
+    const item: ModelItem = { name: names.get(id) ?? objects.get(`${path}#${id}`)?.name ?? `Object ${items.length + 1}`, parts: [], negatives: [] };
+    emit(item, path, id, parse3mfTransform(attr(bm[1], 'transform')), 0);
+    if (item.parts.length) items.push(item);
   }
-  if (!items) for (const key of objects.keys()) { const [p, id] = key.split('#'); emit(p, id, IDENTITY, 0); }
-  if (!parts.length) throw new Error('This 3MF has no mesh data');
-  return mergeMeshes(parts);
+  if (!items.length) {
+    const item: ModelItem = { name: 'Model', parts: [], negatives: [] };
+    for (const key of objects.keys()) { const [p, id] = key.split('#'); emit(item, p, id, IDENTITY, 0); }
+    if (item.parts.length) items.push(item);
+  }
+  if (!items.length) throw new Error('This 3MF has no mesh data');
+  return items;
+}
+
+/** Load a model file as its printable items (one item for STL/OBJ/PLY). */
+export async function loadModelItems(name: string, data: ArrayBuffer): Promise<ModelItem[]> {
+  if (formatFromName(name) === '3mf') return parse3MFItems(data);
+  return [{ name: name.replace(/\.[^.]+$/, ''), parts: [await loadModel(name, data)], negatives: [] }];
 }
 
 export function mergeMeshes(parts: TriMesh[]): TriMesh {

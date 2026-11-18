@@ -59,6 +59,10 @@ export function DropPanel() {
   const repairs = useStore((s) => s.repairs);
   const printer = useStore((s) => s.printer);
   const parts = useStore((s) => s.parts);
+  const items = useStore((s) => s.items);
+  const item = useStore((s) => s.item);
+  const pickItem = useStore((s) => s.pickItem);
+  const setStep = useStore((s) => s.setStep);
   const input = useRef<HTMLInputElement>(null);
   return (
     <div className="panel-body">
@@ -67,6 +71,21 @@ export function DropPanel() {
       <button className="primary wide" onClick={() => input.current?.click()}>Choose a file</button>
       <input ref={input} type="file" accept=".stl,.obj,.ply,.3mf" hidden onChange={(e) => e.target.files?.[0] && loadFile(e.target.files[0])} />
       <button className="ghost wide" onClick={loadSample}>Try the sample figure</button>
+      {items.length > 1 && (
+        <div className="card">
+          <div className="card-title">This file has {items.length} objects</div>
+          <p className="muted small">Pick the one to chop.</p>
+          <ul className="item-list">
+            {items.map((it, i) => (
+              <li key={i}>
+                <button className={i === item ? 'item active' : 'item'} onClick={() => i !== item && pickItem(i)}>
+                  <span>{it.name}</span><small>{it.triangles.toLocaleString()} triangles</small>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {health && (
         <div className="card">
           <div className="card-title">{fileName}</div>
@@ -79,6 +98,7 @@ export function DropPanel() {
           {repairs.length > 0 && <ul className="fixes">{repairs.map((r) => <li key={r}>{r}</li>)}</ul>}
         </div>
       )}
+      {health && <button className="primary wide" onClick={() => setStep('chop')}>Next: chop</button>}
     </div>
   );
 }

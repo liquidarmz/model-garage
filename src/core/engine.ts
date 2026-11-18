@@ -1,6 +1,6 @@
 import type { Manifold } from 'manifold-3d';
 import { toSolid, fromSolid, solidBounds, getKernel, type Plane } from './geometry';
-import { loadModel } from './loaders';
+import { loadModelItems, type ModelItem } from './loaders';
 import { type TriMesh, type MeshHealth, analyzeMesh, type Vec3 } from './mesh';
 import type { PrinterProfile } from './printers';
 import { type SplitPlan, suggestPlans } from './smartcut';
@@ -23,6 +23,9 @@ export interface PartData {
 
 export interface BaseData {
   fileName: string;
+  /** Printable objects in the file; `item` is the one loaded. */
+  items: { name: string; triangles: number }[];
+  item: number;
   health: MeshHealth;
   repairs: string[];
   bounds: Bounds;
@@ -52,32 +55,49 @@ export class GeometryEngine {
   private base: Manifold | null = null;
   private parts: BuiltPart[] = [];
   private fileName = 'Model';
+  private label = 'Model';
+  private items: ModelItem[] = [];
+  private item = 0;
   private repairs: string[] = [];
   progress: Progress = () => {};
 
   async load(name: string, buffer: ArrayBuffer): Promise<BaseData> {
     this.progress(`Reading ${name}`);
-    const mesh = await loadModel(name, buffer);
-    this.progress(`Checking and repairing ${(mesh.indices.length / 3).toLocaleString()} triangles`);
-    const { solid, repaired } = await toSolid(mesh);
-    return this.setBase(solid, name, repaired);
+    this.items = await loadModelItems(name, buffer);
+    this.fileName = name;
+    // Start with the biggest object; the others can be picked afterwards.
+    const tris = this.items.map(itemTriangles);
+    return this.pickItem(tris.indexOf(Math.max(...tris)));
+  }
+
+  /** Load one object of a multi-object file. */
+  async pickItem(index: number): Promise<BaseData> {
+    const item = this.items[index];
+    if (!item) throw new Error('That object is not in this file.');
+    this.progress(`Checking and repairing ${itemTriangles(item).toLocaleString()} triangles`);
+    const { solid, repaired } = await toSolid(item.parts, item.negatives);
+    this.item = index;
+    const label = this.items.length > 1 ? `${this.fileName} (${item.name})` : this.fileName;
+    return this.setBase(solid, label, repaired);
   }
 
   async sample(height = 300): Promise<BaseData> {
     this.progress('Building the sample figure');
+    this.items = [];
+    this.item = 0;
     return this.setBase(await sampleFigure(height), `Sample figure (${height} mm)`, []);
   }
 
   async scale(factor: number): Promise<BaseData> {
     const base = this.need();
-    return this.setBase(base.scale([factor, factor, factor]), this.fileName, []);
+    return this.setBase(base.scale([factor, factor, factor]), this.label, []);
   }
 
   async mirror(axis: 0 | 1 | 2): Promise<BaseData> {
     const base = this.need();
     const n: Vec3 = [0, 0, 0];
     n[axis] = 1;
-    return this.setBase(base.mirror(n), this.fileName, this.repairs);
+    return this.setBase(base.mirror(n), this.label, this.repairs);
   }
 
   async suggest(printer: PrinterProfile): Promise<SplitPlan[]> {
@@ -133,13 +153,18 @@ export class GeometryEngine {
     solid.delete();
     this.dispose();
     this.base = centered;
-    this.fileName = name;
+    this.label = name;
     this.repairs = repairs;
     const whole: BuiltPart = { id: 'p0', name: 'Part 1', kind: 'part', solid: centered.translate([0, 0, 0]), faces: [] };
     this.parts = [whole];
     const part = toPartData(whole);
-    return { fileName: name, health: analyzeMesh(part.mesh), repairs, bounds: part.bounds, part };
+    const items = this.items.map((i) => ({ name: i.name, triangles: itemTriangles(i) }));
+    return { fileName: name, items, item: this.item, health: analyzeMesh(part.mesh), repairs, bounds: part.bounds, part };
   }
+}
+
+function itemTriangles(i: ModelItem): number {
+  return i.parts.reduce((n, m) => n + m.indices.length / 3, 0);
 }
 
 function toPartData(p: BuiltPart): PartData {
@@ -147,4 +172,4 @@ function toPartData(p: BuiltPart): PartData {
 }
 
 /** Methods callable across the worker boundary. */
-export type EngineMethod = 'load' | 'sample' | 'scale' | 'mirror' | 'suggest' | 'anchor' | 'build' | 'layout' | 'dispose';
+export type EngineMethod = 'load' | 'pickItem' | 'sample' | 'scale' | 'mirror' | 'suggest' | 'anchor' | 'build' | 'layout' | 'dispose';
