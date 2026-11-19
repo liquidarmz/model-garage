@@ -10,8 +10,12 @@ import type { BaseData, Bounds, PartData } from '../core/engine';
 import { createEngine } from './engineClient';
 import * as THREE from 'three';
 import { viewRegistry } from './viewRegistry';
-import { type RGB, type RGBImage, projectPicture, kmeansColors, nearest, hexToRgb, rgbToHex } from '../core/imagePaint';
+import { type RGB, type RGBImage, projectPicture, makeProjector, kmeansColors, nearest, hexToRgb, rgbToHex } from '../core/imagePaint';
 import { saveFile } from './saveFile';
+import { refineAndPaint } from '../core/refine';
+
+/** Most extra triangles a picture may add across the model. */
+const DETAIL_BUDGET = 1_500_000;
 import { type PaintPlan, type Segmentation, segmentPicture, planImage } from '../core/segment';
 import { getSampler, localPlan, claudePlan, imageToDataUrl } from './colorPlan';
 
@@ -40,6 +44,8 @@ export interface PartView {
   fits: boolean;
   /** Bumped whenever paint changes so the viewport re-uploads colors. */
   version: number;
+  /** The part's mesh as the geometry engine has it, when painting split triangles for detail. */
+  sourceMesh?: TriMesh;
 }
 
 export interface PlacedView {
@@ -148,6 +154,46 @@ async function readPicture(url: string): Promise<RGBImage> {
   const ctx = canvas.getContext('2d')!;
   ctx.drawImage(img, 0, 0, w, h);
   return { width: w, height: h, data: ctx.getImageData(0, 0, w, h).data };
+}
+
+/** The rotation + move taking mesh `a` onto mesh `b` (same vertices, rigidly moved), or null. */
+function rigidBetween(a: TriMesh, b: TriMesh): THREE.Matrix4 | null {
+  if (a.positions.length !== b.positions.length || a.positions.length < 9) return null;
+  const P = (m: TriMesh, i: number) => new THREE.Vector3(m.positions[i * 3], m.positions[i * 3 + 1], m.positions[i * 3 + 2]);
+  const n = a.positions.length / 3;
+  // Three well-spread vertices: the first, the farthest from it, and the farthest from that line.
+  const a0 = P(a, 0);
+  let i1 = 0, d1 = 0;
+  for (let i = 0; i < n; i++) { const d = P(a, i).distanceToSquared(a0); if (d > d1) { d1 = d; i1 = i; } }
+  const axis = P(a, i1).sub(a0).normalize();
+  let i2 = 0, d2 = 0;
+  for (let i = 0; i < n; i++) { const v = P(a, i).sub(a0); const d = v.sub(axis.clone().multiplyScalar(v.dot(axis))).lengthSq(); if (d > d2) { d2 = d; i2 = i; } }
+  if (d2 < 1e-8) return null;
+  const frame = (m: TriMesh) => {
+    const o = P(m, 0), x = P(m, i1).sub(o).normalize();
+    const z = new THREE.Vector3().crossVectors(x, P(m, i2).sub(o)).normalize();
+    const y = new THREE.Vector3().crossVectors(z, x);
+    return new THREE.Matrix4().makeBasis(x, y, z).setPosition(o);
+  };
+  const T = frame(b).multiply(frame(a).invert());
+  // Check a few vertices actually line up.
+  for (let k = 0; k < 8; k++) {
+    const i = Math.floor((k * (n - 1)) / 7);
+    if (P(a, i).applyMatrix4(T).distanceTo(P(b, i)) > 1e-2) return null;
+  }
+  return T;
+}
+
+function applyRigid(m: TriMesh, T: THREE.Matrix4 | null): TriMesh | null {
+  if (!T) return null;
+  const e = T.elements, p = m.positions, out = new Float32Array(p.length);
+  for (let i = 0; i < p.length; i += 3) {
+    const x = p[i], y = p[i + 1], z = p[i + 2];
+    out[i] = e[0] * x + e[4] * y + e[8] * z + e[12];
+    out[i + 1] = e[1] * x + e[5] * y + e[9] * z + e[13];
+    out[i + 2] = e[2] * x + e[6] * y + e[10] * z + e[14];
+  }
+  return { positions: out, indices: m.indices };
 }
 
 const yieldFrame = () => new Promise((r) => setTimeout(r, 30));
@@ -373,8 +419,12 @@ export const useStore = create<State>((set, get) => {
           const part = byId.get(pp.id);
           if (!part) return [];
           // Orientation/translation is rigid, so triangle order (and paint) is kept.
-          const colors = pp.mesh.indices.length === part.mesh.indices.length ? part.paint.colors : new Uint8Array(pp.mesh.indices.length / 3);
-          return [{ id: pp.id, name: part.name, mesh: pp.mesh, colors, plate: pp.plate }];
+          const src = part.sourceMesh ?? part.mesh;
+          if (pp.mesh.indices.length !== src.indices.length) return [{ id: pp.id, name: part.name, mesh: pp.mesh, colors: new Uint8Array(pp.mesh.indices.length / 3), plate: pp.plate }];
+          if (!part.sourceMesh) return [{ id: pp.id, name: part.name, mesh: pp.mesh, colors: part.paint.colors, plate: pp.plate }];
+          // Detail was added: move the detailed mesh the same way the engine moved the original.
+          const moved = applyRigid(part.mesh, rigidBetween(src, pp.mesh));
+          return [{ id: pp.id, name: part.name, mesh: moved ?? pp.mesh, colors: moved ? part.paint.colors : new Uint8Array(pp.mesh.indices.length / 3), plate: pp.plate }];
         }),
       });
     },
@@ -477,48 +527,58 @@ export const useStore = create<State>((set, get) => {
           return { positions: p.mesh.positions, indices: p.mesh.indices, matrixWorld: obj.matrixWorld.elements };
         });
         const camPos = new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);
-        const seen = projectPicture(projParts, {
-          viewProj: viewProj.elements, cameraPos: [camPos.x, camPos.y, camPos.z],
+        const view = {
+          viewProj: viewProj.elements, cameraPos: [camPos.x, camPos.y, camPos.z] as [number, number, number],
           width: viewRegistry.size.width, height: viewRegistry.size.height,
-        }, plan ? planImage(seg!, plan, hexToRgb) : s.picture!.image, {
-          paintBack: s.picturePaintBack, scale: s.pictureScale, offsetX: s.pictureOffset[0], offsetY: s.pictureOffset[1], backdrop: !plan,
-        });
-        const samples = seen.flat().filter((c): c is RGB => !!c);
-        if (!samples.length) throw new Error('The picture does not cover the model. Turn the model so it lines up with the picture, then try again.');
+        };
+        const source = plan ? planImage(seg!, plan, hexToRgb) : s.picture!.image;
+        const popts = { paintBack: s.picturePaintBack, scale: s.pictureScale, offsetX: s.pictureOffset[0], offsetY: s.pictureOffset[1], backdrop: !plan };
+        const proj = makeProjector(projParts, view, source, popts);
         let palette = s.palette;
         let slotCount = s.slotCount;
         if (plan && s.pictureColors === 'picture') {
           // The plan's colors become the filament slots.
           slotCount = Math.min(s.printer.maxColors, Math.max(2, plan.colors.length));
           palette = s.palette.map((c, i) => plan.colors[i]?.hex ?? c);
-        } else if (!plan && s.pictureColors === 'picture') {
-          const found = kmeansColors(samples, s.slotCount).map(rgbToHex);
-          palette = s.palette.map((c, i) => found[i] ?? c);
+        } else if (!plan) {
+          const samples = projectPicture(projParts, view, source, popts).flat().filter((c): c is RGB => !!c);
+          if (!samples.length) throw new Error('The picture does not cover the model. Turn the model so it lines up with the picture, then try again.');
+          if (s.pictureColors === 'picture') {
+            const found = kmeansColors(samples, s.slotCount).map(rgbToHex);
+            palette = s.palette.map((c, i) => found[i] ?? c);
+          }
         }
         const pal = palette.slice(0, slotCount).map(hexToRgb);
+        const slotOf = (c: RGB) => nearest(c, pal);
         // Surfaces the picture can't see keep their look: move them to the closest new color.
         const oldPal = s.palette.slice(0, s.slotCount).map(hexToRgb);
         const keep = oldPal.map((c) => nearest(c, pal));
-        let painted = 0;
-        parts.forEach((p, i) => {
-          const cols = seen[i];
-          const mask = new Uint8Array(cols.length);
-          for (let t = 0; t < cols.length; t++) {
-            const c = cols[t];
-            if (c) { p.paint.colors[t] = nearest(c, pal); mask[t] = 1; painted++; }
-            else if (palette !== s.palette) p.paint.colors[t] = keep[p.paint.colors[t]] ?? 0;
-          }
-          // Tidy only what the picture painted, so unseen sides don't bleed in.
-          p.paint.removeSpecks(Math.max(6, Math.round(cols.length / 4000)), mask);
-          p.paint.smooth(1, mask);
-        });
+        // Extra triangles to spend on detail, shared by size.
+        const totalTris = parts.reduce((n, p) => n + p.paint.triCount, 0) || 1;
+        let painted = 0, added = 0;
+        const updated = new Map<string, PartView>();
+        for (let i = 0; i < parts.length; i++) {
+          const p = parts[i];
+          set({ busy: `Painting fine detail${parts.length > 1 ? ` (part ${i + 1} of ${parts.length})` : ''}` });
+          await yieldFrame();
+          const start = palette !== s.palette ? Uint8Array.from(p.paint.colors, (c) => keep[c] ?? 0) : p.paint.colors;
+          const extra = Math.max(150_000, Math.round((DETAIL_BUDGET * p.paint.triCount) / totalTris));
+          const r = refineAndPaint(p.mesh, start, projParts[i].matrixWorld, proj, slotOf, { minEdge: 0.2, maxTris: p.paint.triCount + extra });
+          const paint = new PaintTarget(r.mesh, r.colors);
+          // A photo (no plan) is noisy: tidy what it painted.
+          if (!plan) { paint.removeSpecks(4, r.painted); paint.smooth(1, r.painted); }
+          painted += r.painted.reduce((n, v) => n + v, 0);
+          added += r.added;
+          updated.set(p.id, { ...p, mesh: r.mesh, paint, sourceMesh: p.sourceMesh ?? p.mesh, version: p.version + 1 });
+        }
+        if (!painted) throw new Error('The picture does not cover the model. Turn the model so it lines up with the picture, then try again.');
         set({
           palette,
           slotCount,
           showPlan: false,
-          parts: get().parts.map((p) => ({ ...p, version: p.version + 1 })),
+          parts: get().parts.map((p) => updated.get(p.id) ?? { ...p, version: p.version + 1 }),
           placed: [],
-          notice: `Painted ${painted.toLocaleString()} surfaces from ${s.picture!.name}. Turn the model and apply again to cover other sides.`,
+          notice: `Painted ${painted.toLocaleString()} surfaces from ${s.picture!.name}${added ? `, adding ${added.toLocaleString()} small triangles for detail` : ''}. Turn the model and apply again to cover other sides.`,
         });
       });
     },

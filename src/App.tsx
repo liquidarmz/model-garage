@@ -59,7 +59,7 @@ export default function App() {
               className="picture-overlay"
               src={showPlan && planPreview ? planPreview : picture.url}
               alt=""
-              style={{ imageRendering: showPlan && planPreview ? 'pixelated' : undefined, opacity: showPlan && planPreview ? Math.max(pictureOpacity, 0.7) : pictureOpacity, transform: `translate(${pictureOffset[0] * 100}%, ${pictureOffset[1] * 100}%) scale(${pictureScale})` }}
+              style={{ opacity: showPlan && planPreview ? Math.max(pictureOpacity, 0.7) : pictureOpacity, transform: `translate(${pictureOffset[0] * 100}%, ${pictureOffset[1] * 100}%) scale(${pictureScale})` }}
             />
           )}
           {!base && !busy && (

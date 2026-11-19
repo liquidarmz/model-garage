@@ -22,11 +22,15 @@ export interface Segmentation {
   /** Region id per pixel, or -1 for the background. */
   labels: Int32Array;
   regions: Region[];
+  /** The same labels at full picture detail (edges follow the real picture). */
+  fine?: { width: number; height: number; labels: Int32Array };
 }
 
 export interface SegmentOptions {
   /** Long side of the working image in pixels. */
   maxSide?: number;
+  /** Long side of the detailed label map. */
+  fineSide?: number;
   /** Starting superpixel count. */
   superpixels?: number;
   /** Most regions to return. */
@@ -66,9 +70,9 @@ function shadeDist(a: ArrayLike<number>, b: ArrayLike<number>): number {
 }
 
 export function segmentPicture(src: RGBImage, o: SegmentOptions = {}): Segmentation {
-  const img = downscale(src, o.maxSide ?? 320);
+  const img = downscale(src, o.maxSide ?? 448);
   const W = img.width, H = img.height, N = W * H;
-  const maxRegions = o.maxRegions ?? 40;
+  const maxRegions = o.maxRegions ?? 48;
   const mergeDist = o.mergeDist ?? 12;
 
   // Lab per pixel, and which pixels are see-through.
@@ -104,7 +108,7 @@ export function segmentPicture(src: RGBImage, o: SegmentOptions = {}): Segmentat
   }
 
   // Superpixels (SLIC) in shade-tolerant Lab plus position.
-  const K = o.superpixels ?? 700;
+  const K = o.superpixels ?? 1200;
   const S = Math.max(2, Math.sqrt(N / K));
   const cs: number[][] = []; // [L, a, b, x, y]
   for (let y = S / 2; y < H; y += S) for (let x = S / 2; x < W; x += S) {
@@ -216,7 +220,7 @@ export function segmentPicture(src: RGBImage, o: SegmentOptions = {}): Segmentat
 
   // Merge: tiny bits always go to their closest neighbor; then the closest
   // pair merges while it's within mergeDist or there are too many regions.
-  const minArea = Math.max(4, N * 0.0015);
+  const minArea = Math.max(4, N * 0.0008);
   let alive = R;
   const closest = (a: number) => {
     let bb = -1, bd = Infinity;
@@ -272,7 +276,58 @@ export function segmentPicture(src: RGBImage, o: SegmentOptions = {}): Segmentat
     area: sum[k][3],
     anchor: anchors[k],
   }));
-  return { width: W, height: H, labels, regions };
+  const fine = refineLabels(src, labels, lab, W, H, o.fineSide ?? 1024);
+  return { width: W, height: H, labels, regions, fine };
+}
+
+/**
+ * Bring the coarse labels up to full detail: each detailed pixel takes the
+ * label of whichever nearby coarse pixel it matches best in color, so region
+ * edges land on the picture's real edges instead of coarse blocks.
+ */
+function refineLabels(src: RGBImage, labels: Int32Array, lab: Float32Array, W: number, H: number, side: number) {
+  const img = downscale(src, side);
+  const FW = img.width, FH = img.height;
+  const out = new Int32Array(FW * FH);
+  const sx = W / FW, sy = H / FH;
+  for (let y = 0; y < FH; y++) {
+    const ly = (y + 0.5) * sy - 0.5;
+    const cy = Math.round(ly);
+    for (let x = 0; x < FW; x++) {
+      const i = y * FW + x;
+      if (img.data[i * 4 + 3] < 128) { out[i] = -1; continue; }
+      const lx = (x + 0.5) * sx - 0.5;
+      const cx = Math.round(lx);
+      const c = rgbToLab([img.data[i * 4], img.data[i * 4 + 1], img.data[i * 4 + 2]]);
+      let best = labels[Math.min(H - 1, Math.max(0, cy)) * W + Math.min(W - 1, Math.max(0, cx))], bd = Infinity;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = cy + dy;
+        if (yy < 0 || yy >= H) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = cx + dx;
+          if (xx < 0 || xx >= W) continue;
+          const j = yy * W + xx;
+          const d0 = c[0] - lab[j * 3], d1 = c[1] - lab[j * 3 + 1], d2 = c[2] - lab[j * 3 + 2];
+          // Color decides; distance only breaks near-ties.
+          const d = d0 * d0 * 0.5 + d1 * d1 + d2 * d2 + ((xx - lx) ** 2 + (yy - ly) ** 2) * 30;
+          if (d < bd) { bd = d; best = labels[j]; }
+        }
+      }
+      out[i] = best;
+    }
+  }
+  // Drop single-pixel noise: a pixel outvoted by 6 of its 8 neighbors joins them.
+  const clean = out.slice();
+  for (let y = 1; y < FH - 1; y++) for (let x = 1; x < FW - 1; x++) {
+    const i = y * FW + x;
+    const votes = new Map<number, number>();
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) if (dx || dy) {
+      const l = out[i + dy * FW + dx];
+      votes.set(l, (votes.get(l) ?? 0) + 1);
+    }
+    for (const [l, n] of votes) if (n >= 6 && l !== out[i]) clean[i] = l;
+  }
+  return { width: FW, height: FH, labels: clean };
 }
 
 /** For each region, the pixel farthest from its edge (chamfer distance). */
@@ -318,12 +373,13 @@ export interface PaintPlan {
 /** Flat-colored picture of a plan: each region in its plan color, the rest see-through. */
 export function planImage(seg: Segmentation, plan: PaintPlan, rgb: (hex: string) => RGB): RGBImage {
   const cols = plan.colors.map((c) => rgb(c.hex));
-  const data = new Uint8ClampedArray(seg.width * seg.height * 4);
-  for (let i = 0; i < seg.labels.length; i++) {
-    const r = seg.labels[i];
+  const map = seg.fine ?? seg;
+  const data = new Uint8ClampedArray(map.width * map.height * 4);
+  for (let i = 0; i < map.labels.length; i++) {
+    const r = map.labels[i];
     const k = r >= 0 ? plan.assign[r] ?? -1 : -1;
     if (k < 0 || !cols[k]) continue;
     data[i * 4] = cols[k][0]; data[i * 4 + 1] = cols[k][1]; data[i * 4 + 2] = cols[k][2]; data[i * 4 + 3] = 255;
   }
-  return { width: seg.width, height: seg.height, data };
+  return { width: map.width, height: map.height, data };
 }
